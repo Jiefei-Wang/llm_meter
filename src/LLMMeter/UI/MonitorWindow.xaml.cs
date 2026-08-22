@@ -113,6 +113,8 @@ public partial class MonitorWindow : Window
 
     private void OnNewWindow(object sender, RoutedEventArgs e) => _manager.CreateWindow(null);
 
+    private void OnCloseWidget(object sender, RoutedEventArgs e) => _manager.CloseWidget(this);
+
     private void OnOpenSelector(object sender, RoutedEventArgs e) => ShowSelectorPopup();
 
     private void OnShowHelp(object sender, RoutedEventArgs e)
@@ -258,8 +260,9 @@ public partial class MonitorWindow : Window
 
     protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
     {
-        // Closing a widget hides it; the app lives in the tray.
-        if (!_manager.IsShuttingDown && Visibility == Visibility.Visible)
+        // Closing a widget hides it (the app lives in the tray) unless this is
+        // an explicit widget removal or app shutdown.
+        if (!_realClose && !_manager.IsShuttingDown && Visibility == Visibility.Visible)
         {
             e.Cancel = true;
             Persisted.Visible = false;
@@ -269,9 +272,12 @@ public partial class MonitorWindow : Window
         base.OnClosing(e);
     }
 
-    public void RealClose()
+    private bool _realClose;
+
+    /// <summary>Removes this widget for good (✕ button): no hide, no restore.</summary>
+    public void RequestRealClose()
     {
-        _manager.IsShuttingDown = true;
+        _realClose = true;
         _poll.Stop();
         Close();
     }

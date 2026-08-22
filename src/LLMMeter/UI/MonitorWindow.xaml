@@ -63,6 +63,8 @@
                             Click="OnNewWindow" ToolTip="New monitor window (Ctrl+N)"/>
                     <Button x:Name="ExpandButton" Style="{StaticResource GlyphButton}" Content="︾"
                             Click="OnToggleExpand" ToolTip="Expand details"/>
+                    <Button x:Name="CloseButton" Style="{StaticResource GlyphButton}" Content="✕"
+                            Click="OnCloseWidget" ToolTip="Close this widget"/>
                 </StackPanel>
             </Grid>
 

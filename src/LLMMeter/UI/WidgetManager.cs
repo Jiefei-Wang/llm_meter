@@ -161,6 +161,15 @@ public sealed class WidgetManager
 
     public IReadOnlyList<MonitorWindow> Windows => _windows;
 
+    /// <summary>Removes a widget permanently (✕ button) and persists the change.</summary>
+    public void CloseWidget(MonitorWindow w)
+    {
+        _windows.Remove(w);
+        _pendingAutoBind.Remove(w);
+        w.RequestRealClose();
+        QueueSave();
+    }
+
     public void RestoreFromConfig(AppConfiguration cfg)
     {
         var list = cfg.Windows;
