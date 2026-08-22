@@ -13,11 +13,21 @@ public sealed class WidgetManager
 {
     public AppServices Services { get; }
     private readonly List<MonitorWindow> _windows = [];
+    private readonly List<MonitorWindow> _pendingAutoBind = [];
+
+    /// <summary>Safety cap for auto-spawned widgets.</summary>
+    public const int MaxWindows = 6;
 
     public bool IsShuttingDown { get; set; }
     public BackendRegistry Registry => Services.Registry;
 
-    public WidgetManager(AppServices services) => Services = services;
+    public WidgetManager(AppServices services)
+    {
+        Services = services;
+        // Discovery raises this on a threadpool thread; hop to the UI thread.
+        Registry.TargetsChanged += () => Application.Current?.Dispatcher.BeginInvoke(
+            System.Windows.Threading.DispatcherPriority.Normal, AutoBindPendingWindows);
+    }
 
     // ------------------------------------------------------------ creation
 
@@ -42,8 +52,78 @@ public sealed class WidgetManager
         }
 
         BindRestoredBackend(w, restore?.BackendId);
+
+        // No explicit selection: let the first suitable discovered backend claim it.
+        if (string.IsNullOrEmpty(w.Persisted.BackendId))
+        {
+            _pendingAutoBind.Add(w);
+            AutoBindPendingWindows();
+        }
+
         QueueSave();
         return w;
+    }
+
+    /// <summary>
+    /// Binds still-unbound widgets to discovered backends nobody else shows yet,
+    /// then spawns additional widgets for discovered backends no window claims
+    /// (up to MaxWindows). Runs on the UI thread. Hidden windows keep their claims.
+    /// </summary>
+    internal void AutoBindPendingWindows()
+    {
+        var entries = Registry.GetTargetEntries();
+        if (entries.Count == 0) return;
+
+        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var w in _windows)
+            if (!string.IsNullOrEmpty(w.Persisted.BackendId))
+                used.Add(w.Persisted.BackendId);
+
+        bool changed = false;
+
+        // 1. Fill unbound windows with unclaimed backends.
+        foreach (var w in _pendingAutoBind.ToArray())
+        {
+            if (!string.IsNullOrEmpty(w.Persisted.BackendId))
+            {
+                _pendingAutoBind.Remove(w); // bound manually meanwhile
+                continue;
+            }
+
+            var entry = entries.FirstOrDefault(e => !used.Contains(e.Target.GroupKey));
+            if (entry == null) break;
+
+            w.Bind(entry);
+            used.Add(entry.Target.GroupKey);
+            _pendingAutoBind.Remove(w);
+            changed = true;
+        }
+
+        // 2. One widget per discovered backend: cover orphans with new windows.
+        foreach (var entry in entries)
+        {
+            if (used.Contains(entry.Target.GroupKey)) continue;
+            if (_windows.Count >= MaxWindows) break;
+            CreateWindowForEntry(entry);
+            used.Add(entry.Target.GroupKey);
+            changed = true;
+        }
+
+        if (changed) QueueSave();
+    }
+
+    private void CreateWindowForEntry(BackendRegistry.TargetEntry entry)
+    {
+        var w = new MonitorWindow(this);
+        _windows.Add(w);
+
+        double x = 120 + (_windows.Count - 1) * 28;
+        double y = 140 + (_windows.Count - 1) * 24;
+        var spot = ScreenGuard.EnsureVisible(x, y, 320, 130);
+        w.Left = spot.X; w.Top = spot.Y;
+        w.WindowStartupLocation = WindowStartupLocation.Manual;
+        w.Show();
+        w.Bind(entry);
     }
 
     /// <summary>Rebind to a saved backend id once discovery knows it.</summary>
