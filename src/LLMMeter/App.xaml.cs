@@ -85,7 +85,9 @@ public partial class App : Application
         _services = services;
 
         services.Tray = new TrayService(services);
-        registry.TargetsChanged += UpdateTrayTooltip;
+        // TargetsChanged fires on a threadpool thread; marshal tooltip updates.
+        registry.TargetsChanged += () => Dispatcher.BeginInvoke(
+            System.Windows.Threading.DispatcherPriority.Normal, UpdateTrayTooltip);
         registry.Discovery.Start();
         services.Widgets.RestoreFromConfig(config);
 

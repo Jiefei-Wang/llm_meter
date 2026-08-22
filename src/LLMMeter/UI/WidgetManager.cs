@@ -141,11 +141,17 @@ public sealed class WidgetManager
 
         if (tryBind()) return;
 
+        // TargetsChanged fires on a threadpool thread; w.Bind touches WPF,
+        // so hop to the UI thread before touching the window.
         Registry.TargetsChanged += onTargets;
         void onTargets()
         {
-            if (tryBind())
-                Registry.TargetsChanged -= onTargets;
+            Application.Current?.Dispatcher.BeginInvoke(
+                System.Windows.Threading.DispatcherPriority.Normal, () =>
+                {
+                    if (tryBind())
+                        Registry.TargetsChanged -= onTargets;
+                });
         }
     }
 

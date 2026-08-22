@@ -55,6 +55,7 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
         _lastRendered = null;
         _forceNext = true;
         CurrentHelp = collector.GetHelp();
+        Log.Info($"VM bound to {collector.Endpoint.Id}");
         PollLatest(force: true);
     }
 

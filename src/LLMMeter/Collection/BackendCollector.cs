@@ -22,6 +22,7 @@ public sealed class BackendCollector : IDisposable
 
     private IBackendAdapter? _adapter;
     private MetricSnapshot? _latest;
+    private ConnectionState? _lastLoggedState;
     private long _lastSuccessTicks;
     private int _consecutiveFailures;
     private Task _loop = null!;
@@ -89,6 +90,11 @@ public sealed class BackendCollector : IDisposable
             {
                 using var http = new PollHttp(_client, _endpoint.BaseUrl, PollTimeout);
                 var snapshot = await _adapter.CollectAsync(http, ct).ConfigureAwait(false);
+                if (snapshot.State != _lastLoggedState)
+                {
+                    Log.Info($"{_endpoint.Id} state {(_lastLoggedState?.ToString() ?? "first")} -> {snapshot.State}");
+                    _lastLoggedState = snapshot.State;
+                }
 
                 if (snapshot.State != ConnectionState.Offline)
                 {
