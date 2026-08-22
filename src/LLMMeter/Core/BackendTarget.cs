@@ -1,0 +1,72 @@
+namespace LLMMeter.Core;
+
+[Flags]
+public enum BackendCapabilities
+{
+    None = 0,
+    RunningRequests = 1 << 0,
+    QueuedRequests = 1 << 1,
+    AggregatePrefillRate = 1 << 2,
+    AggregateGenerationRate = 1 << 3,
+    KvCacheUsage = 1 << 4,
+    ActiveRequestEnumeration = 1 << 5,
+    PerRequestInputTokens = 1 << 6,
+    PerRequestOutputTokens = 1 << 7,
+    PerRequestGenerationRate = 1 << 8,
+    RecentRequestTtft = 1 << 9,
+}
+
+/// <summary>Where an endpoint physically lives. Never flattened into a generic localhost.</summary>
+public enum OriginKind
+{
+    WindowsHost,
+    Wsl,
+    Manual,
+}
+
+/// <summary>An HTTP inference server endpoint.</summary>
+public sealed record EndpointRef(
+    string Id,              // stable identity: origin|host|port
+    Uri BaseUrl,
+    OriginKind Origin,
+    string? WslDistro)      // non-null when Origin == Wsl
+{
+    public string HostPort => BaseUrl.IsDefaultPort ? BaseUrl.Authority : $"{BaseUrl.Host}:{BaseUrl.Port}";
+}
+
+public enum BackendKind
+{
+    Unknown,
+    Vllm,
+    LlamaCpp,
+    LmStudio,
+    Ollama,
+    GenericOpenAi,
+}
+
+public static class BackendKindExtensions
+{
+    public static string DisplayName(this BackendKind kind) => kind switch
+    {
+        BackendKind.Vllm => "vLLM",
+        BackendKind.LlamaCpp => "llama-server",
+        BackendKind.LmStudio => "LM Studio",
+        BackendKind.Ollama => "Ollama",
+        BackendKind.GenericOpenAi => "OpenAI-compatible",
+        _ => "Unknown",
+    };
+}
+
+/// <summary>
+/// A selectable monitoring target. An endpoint may expose multiple targets
+/// (e.g. one per loaded model). Targets referencing the same endpoint share one collector.
+/// </summary>
+public sealed record BackendTarget(
+    string Id,
+    EndpointRef Endpoint,
+    BackendKind Kind,
+    string? ModelId,        // model-scoped target when supported (LM Studio)
+    string DisplayName)
+{
+    public string GroupKey => $"{Endpoint.Id}|{ModelId ?? "*"}";
+}

@@ -1,0 +1,9 @@
+bin/
+obj/
+*.user
+.vs/
+publish/
+artifacts/
+TestResults/
+*.log
+LLMMeter.log

@@ -1,0 +1,56 @@
+<Window x:Class="LLMMeter.UI.AddBackendDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Add backend" Width="440" SizeToContent="Height"
+        WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        ShowInTaskbar="False" Background="{DynamicResource BgBrush}">
+    <StackPanel Margin="14">
+        <TextBlock Text="Add backend" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,10"/>
+
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="110"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,8"
+                       Text="Display name"/>
+            <TextBox x:Name="NameBox" Grid.Row="0" Grid.Column="1" Margin="0,0,0,8"
+                     Padding="5,3" VerticalContentAlignment="Center"
+                     ToolTip="Optional — shown in the dropdown instead of host:port"/>
+
+            <TextBlock Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,8"
+                       Text="URL / host:port"/>
+            <DockPanel Grid.Row="1" Grid.Column="1" Margin="0,0,0,8">
+                <Button DockPanel.Dock="Right" Content="Test" Width="52" Margin="6,0,0,0"
+                        Padding="2" x:Name="TestButton" Click="OnTest"/>
+                <TextBox x:Name="UrlBox" Padding="5,3" VerticalContentAlignment="Center"
+                         Text="http://127.0.0.1:8000"
+                         ToolTip="Full base URL, e.g. http://192.168.68.50:8000"/>
+            </DockPanel>
+
+            <TextBlock Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Margin="0,0,8,0"
+                       Text="Backend type"/>
+            <ComboBox x:Name="TypeBox" Grid.Row="2" Grid.Column="1" Padding="5,3"
+                      VerticalContentAlignment="Center"/>
+        </Grid>
+
+        <TextBlock x:Name="ResultText" FontSize="11" Foreground="{DynamicResource DimBrush}"
+                   Margin="0,10,0,0" TextWrapping="Wrap" MinHeight="16"/>
+
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Content="Add" Width="72" Padding="4,3" x:Name="AddButton" Click="OnAdd"
+                    IsDefault="True" Margin="0,0,8,0"/>
+            <Button Content="Cancel" Width="72" Padding="4,3" Click="OnCancel" IsCancel="True"/>
+        </StackPanel>
+
+        <TextBlock FontSize="10" Foreground="{DynamicResource DimBrush}" Margin="0,10,0,0"
+                   TextWrapping="Wrap"
+                   Text="Manual endpoints are saved to LLMMeter.json next to the EXE. Automatic discovery never scans the LAN — remote servers must be added here."/>
+    </StackPanel>
+</Window>
