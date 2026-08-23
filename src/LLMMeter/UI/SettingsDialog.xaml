@@ -24,6 +24,12 @@
 
         <Separator Margin="0,6,0,10"/>
 
+        <TextBlock Text="Widgets" FontWeight="SemiBold" FontSize="11.5"/>
+        <CheckBox x:Name="TopmostCheck" Content="New widgets always stay in front (topmost)"
+                  Margin="4,6,0,6"/>
+
+        <Separator Margin="0,6,0,10"/>
+
         <TextBlock Text="Diagnostics" FontWeight="SemiBold" FontSize="11.5"/>
         <CheckBox x:Name="LoggingCheck" Content="Write LLMMeter.log beside the EXE (size-capped)"
                   Margin="4,6,0,4"/>

@@ -37,6 +37,10 @@ public sealed class AppConfiguration
 
     [JsonPropertyName("discovery")]
     public DiscoveryConfig Discovery { get; set; } = new();
+
+    /// <summary>Newly created widgets default to always-on-top.</summary>
+    [JsonPropertyName("topmostByDefault")]
+    public bool TopmostByDefault { get; set; } = true;
 }
 
 public sealed class DiscoveryConfig

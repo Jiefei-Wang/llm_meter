@@ -22,6 +22,7 @@ public partial class SettingsDialog : Window
 
         LoggingCheck.IsChecked = Log.Enabled;
         ConfigPathText.Text = services.ConfigService.ConfigPath;
+        TopmostCheck.IsChecked = services.Config.TopmostByDefault;
 
         // manual endpoints list with delete buttons
         RefreshManualList();
@@ -69,6 +70,8 @@ public partial class SettingsDialog : Window
             Log.Enable();
         else if (LoggingCheck.IsChecked != true && Log.Enabled)
             Log.Disable();
+
+        cfg.TopmostByDefault = TopmostCheck.IsChecked == true;
 
         _services.Widgets.SaveNow();
         Close();

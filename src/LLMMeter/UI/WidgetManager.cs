@@ -48,6 +48,7 @@ public sealed class WidgetManager
             var spot = ScreenGuard.EnsureVisible(x, y, 320, 130);
             w.Left = spot.X; w.Top = spot.Y;
             w.WindowStartupLocation = WindowStartupLocation.Manual;
+            w.Topmost = Services.Config.TopmostByDefault;
             w.Show();
         }
 
@@ -201,6 +202,13 @@ public sealed class WidgetManager
 
     public void ToggleAllWindows()
     {
+        // All widgets closed via ✕: bring the app back by creating a fresh one.
+        if (_windows.Count == 0)
+        {
+            CreateWindow(null);
+            return;
+        }
+
         bool anyVisible = _windows.Any(w => w.IsVisible);
         foreach (var w in _windows)
         {
