@@ -33,16 +33,16 @@ public sealed class RateCalculator(double holdSeconds = 2.0)
     /// <param name="stopwatchTicks">Monotonic clock reading for this sample.</param>
     public MetricValue<double> Update(double counter, long stopwatchTicks)
     {
-        // Counter reset (server restart). Discard state, re-baseline.
+        // A decrease means the counter was re-baselined (e.g. a per-slot
+        // n_decoded reset when a request finished, or a server restart). Never
+        // flash to zero: re-baseline for the next interval, but honour the hold
+        // window so the last non-zero rate stays on screen.
         if (_lastCounter.HasValue && counter < _lastCounter.Value - 1e-9)
         {
             _lastCounter = counter;
             _lastTicks = stopwatchTicks;
-            _hasDisplay = false;
-            _display = 0;
-            _lastNonZero = 0;
-            _lastNonZeroTicks = 0;
-            return MetricValue<double>.Approx(0, MetricSource.Derived, "counter reset; baseline reset");
+            LastDtSeconds = 0;
+            return HoldingOrZero(stopwatchTicks, "counter reset; re-baselined");
         }
 
         if (_lastCounter is null)
@@ -63,7 +63,6 @@ public sealed class RateCalculator(double holdSeconds = 2.0)
         if (dt <= 0.0005)
             return CurrentOrNone();
 
-        MetricValue<double> result;
         if (delta > 1e-9)
         {
             // Non-zero interval: show it at once and arm the hold timer.
@@ -72,26 +71,28 @@ public sealed class RateCalculator(double holdSeconds = 2.0)
             _lastNonZeroTicks = stopwatchTicks;
             _display = rate;
             _hasDisplay = true;
-            result = MetricValue<double>.Approx(rate, MetricSource.Derived, $"rate over {dt:0.#}s");
-        }
-        else if (_hasDisplay && stopwatchTicks - _lastNonZeroTicks < (long)(_holdSeconds * Stopwatch.Frequency))
-        {
-            // No progress, but within the hold window: keep the last non-zero.
-            _display = _lastNonZero;
-            result = MetricValue<double>.Approx(_lastNonZero, MetricSource.Derived, "holding last rate");
-        }
-        else
-        {
-            // Confirmed idle past the hold window: real zero.
-            _display = 0;
-            _hasDisplay = true;
-            result = MetricValue<double>.Approx(0, MetricSource.Derived, "idle");
+            return MetricValue<double>.Approx(rate, MetricSource.Derived, $"rate over {dt:0.#}s");
         }
 
-        return result;
+        return HoldingOrZero(stopwatchTicks, "no progress");
 
         MetricValue<double> CurrentOrNone() =>
             _hasDisplay ? MetricValue<double>.Approx(_display, MetricSource.Derived, "too soon") : MetricValue<double>.None;
+    }
+
+    private MetricValue<double> HoldingOrZero(long stopwatchTicks, string note)
+    {
+        if (_hasDisplay && stopwatchTicks - _lastNonZeroTicks < (long)(_holdSeconds * Stopwatch.Frequency))
+        {
+            // Within the hold window: keep the last non-zero rate on screen.
+            _display = _lastNonZero;
+            return MetricValue<double>.Approx(_lastNonZero, MetricSource.Derived, "holding last rate");
+        }
+
+        // Confirmed idle past the hold window: real zero.
+        _display = 0;
+        _hasDisplay = true;
+        return MetricValue<double>.Approx(0, MetricSource.Derived, note);
     }
 
     /// <summary>Call when the backend identity changed or state was lost.</summary>

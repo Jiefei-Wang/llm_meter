@@ -77,6 +77,13 @@ public partial class MonitorWindow : Window
         SubtitleText.Text = "select a backend";
     }
 
+    /// <summary>Shown while discovery hasn't found the backend yet.</summary>
+    public void ShowScanning()
+    {
+        HeaderText.Text = "LLM Meter";
+        SubtitleText.Text = "scanning for servers…";
+    }
+
     private void UpdateHeaderFromEntry(BackendRegistry.TargetEntry entry)
     {
         string name = entry.ModelName is { Length: > 0 } m

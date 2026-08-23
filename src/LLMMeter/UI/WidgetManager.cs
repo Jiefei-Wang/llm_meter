@@ -61,6 +61,11 @@ public sealed class WidgetManager
             AutoBindPendingWindows();
         }
 
+        // Still unbound (backend not yet discovered): show a scanning hint
+        // instead of the misleading "select a backend".
+        if (string.IsNullOrEmpty(w.Persisted.BackendId))
+            w.ShowScanning();
+
         QueueSave();
         return w;
     }
@@ -140,7 +145,13 @@ public sealed class WidgetManager
             return true;
         }
 
-        if (tryBind()) return;
+        if (tryBind())
+        {
+            return;
+        }
+
+        // Saved backend not discovered yet: hint that we're still scanning.
+        w.ShowScanning();
 
         // TargetsChanged fires on a threadpool thread; w.Bind touches WPF,
         // so hop to the UI thread before touching the window.

@@ -84,12 +84,33 @@ public class RateCalculatorTests
         var before = rc.Update(101_000, Ticks(1));
         Assert.InRange(before.Value, 900, 1100);
 
-        // server restarted: counter dropped
+        // server restarted: counter dropped. Within hold window → holds, not negative.
         var afterReset = rc.Update(50, Ticks(2));
-        Assert.True(afterReset.Value >= 0, $"negative rate bug! {afterReset.Value}");
+        Assert.True(afterReset.Value >= 0 && afterReset.Value > 0, $"negative/flash bug! {afterReset.Value}");
 
-        // next interval is measured from the new baseline
-        var next = rc.Update(250, Ticks(3));
+        // next interval measured from the new baseline: meaningful rate again
+        var next = rc.Update(250, Ticks(3)); // 200 / 1s
         Assert.True(next.Value >= 0);
+    }
+
+    [Fact]
+    public void Decrease_ReBaselines_And_Holds_Then_Zeroes()
+    {
+        var rc = new RateCalculator();
+        rc.Update(0, Ticks(0));
+        rc.Update(500, Ticks(1));         // 500 tok/s
+
+        // Counter drops (e.g. request finished, slot n_decoded reset):
+        // must NOT flash to zero — hold within the 2s window.
+        var afterDrop = rc.Update(0, Ticks(1.5));
+        Assert.InRange(afterDrop.Value, 400, 600);
+
+        // past the hold window → real zero
+        var zero = rc.Update(0, Ticks(4));
+        Assert.Equal(0, zero.Value);
+
+        // and it can recover on the next request
+        var resumed = rc.Update(100, Ticks(4.5)); // 100 / 0.5s = 200 tok/s
+        Assert.InRange(resumed.Value, 150, 250);
     }
 }
