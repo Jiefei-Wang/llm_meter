@@ -18,7 +18,7 @@ public class RateCalculatorTests
     }
 
     [Fact]
-    public void Second_Sample_Produces_Positive_Rate()
+    public void NonZero_Interval_Shown_Immediately()
     {
         var rc = new RateCalculator();
         rc.Update(0, Ticks(0));
@@ -31,53 +31,48 @@ public class RateCalculatorTests
     }
 
     [Fact]
-    public void Rolling_Two_Second_Average_Is_Used()
+    public void NonZero_Holds_Last_Value_Then_Zeroes_When_Idle()
     {
         var rc = new RateCalculator();
         rc.Update(0, Ticks(0));
+        rc.Update(500, Ticks(1));        // 500 tok/s
 
-        // Steady 500 tok/s: +250 every 0.5s for 4 samples (2s window)
-        for (int i = 1; i <= 4; i++)
-            rc.Update(250L * i, Ticks(0.5 * i));
+        // within 2s hold window: still shows ~500 even though counter is flat
+        var held = rc.Update(500, Ticks(2));
+        Assert.InRange(held.Value, 400, 600);
 
-        // raw rate per interval is 500; averaged over the window stays ~500
-        var avg = rc.Update(250L * 5, Ticks(0.5 * 5));
-        Assert.InRange(avg.Value, 400, 600);
-    }
+        var held2 = rc.Update(500, Ticks(2.5));
+        Assert.InRange(held2.Value, 400, 600);
 
-    [Fact]
-    public void Idle_Then_NonZero_Jumps_Immediately_No_Averaging_Down()
-    {
-        var rc = new RateCalculator();
-        rc.Update(0, Ticks(0));
-        rc.Update(500, Ticks(1));  // busy: 500 tok/s
-
-        // two flat samples → real zero
-        rc.Update(500, Ticks(2));
-        var zero = rc.Update(500, Ticks(3));
+        // past the 2s hold (last non-zero was at t=1): real zero
+        var zero = rc.Update(500, Ticks(3.1));
         Assert.Equal(0, zero.Value);
-
-        // work resumes with a big jump in 0.5s: must show the fresh rate at once
-        // (should NOT be dragged down by the idle window averaging toward 0)
-        var resumed = rc.Update(700, Ticks(3.5));
-        Assert.True(resumed.Value > 0);
-        Assert.InRange(resumed.Value, 350, 450); // 200 tokens / 0.5s = 400 tok/s
     }
 
     [Fact]
-    public void Idle_Over_Window_Shows_Zero()
+    public void Fresh_NonZero_Resets_Hold_And_Shows_Immediately()
     {
         var rc = new RateCalculator();
         rc.Update(0, Ticks(0));
-        rc.Update(500, Ticks(1));
+        rc.Update(500, Ticks(1));        // 500 tok/s
+        rc.Update(500, Ticks(2));        // holding
 
-        // 2s window still contains the busy interval: the average decays, not zeroes
-        var decayed = rc.Update(500, Ticks(2));
-        Assert.True(decayed.Value > 0);
+        // work resumes with a big jump: must show the fresh rate at once,
+        // NOT dragged down or blended with the prior held value
+        var resumed = rc.Update(700, Ticks(2.5)); // 200 tokens / 0.5s = 400 tok/s
+        Assert.True(resumed.Value > 0);
+        Assert.InRange(resumed.Value, 350, 450);
+    }
 
-        // once the busy interval leaves the 2s window, the average is a true zero
-        var s2 = rc.Update(500, Ticks(3));
-        Assert.Equal(0, s2.Value);
+    [Fact]
+    public void Rate_Is_Not_Averaged_Between_Samples()
+    {
+        var rc = new RateCalculator();
+        rc.Update(100, Ticks(0));
+        rc.Update(200, Ticks(0.5));      // 200 tok/s
+        // next interval is twice the tokens over the same dt → 400 tok/s
+        var v = rc.Update(400, Ticks(1.0)); // 200 more over 0.5s → 400 tok/s
+        Assert.InRange(v.Value, 380, 420);
     }
 
     [Fact]
@@ -96,23 +91,5 @@ public class RateCalculatorTests
         // next interval is measured from the new baseline
         var next = rc.Update(250, Ticks(3));
         Assert.True(next.Value >= 0);
-    }
-
-    [Fact]
-    public void Within_Window_Unchanged_Holds_Value_Until_Window_Exhausted()
-    {
-        var rc = new RateCalculator();
-        rc.Update(100, Ticks(0));
-        var busy = rc.Update(200, Ticks(0.5)); // 200 tok/s instant
-        Assert.True(busy.Value > 0);
-
-        // one flat sample following a busy one: window still contains the busy
-        // interval, so the average is not yet zero
-        var next = rc.Update(200, Ticks(1.0));
-        Assert.True(next.Value > 0);
-
-        // enough flat samples to push the busy interval out of the 2s window
-        var far = rc.Update(200, Ticks(3.0));
-        Assert.Equal(0, far.Value);
     }
 }

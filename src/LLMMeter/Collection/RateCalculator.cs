@@ -4,116 +4,105 @@ using LLMMeter.Core;
 namespace LLMMeter.Collection;
 
 /// <summary>
-/// Converts a monotonically increasing counter into a smooth tok/s rate using a
-/// rolling time window. The displayed value is the average rate over the last
-/// <c>windowSeconds</c> (default 2 s), which keeps the UI stable. When the counter
-/// has been flat (displayed 0) and a fresh non-zero interval arrives, the stale
-/// window is dropped so the new rate is shown immediately instead of being
-/// averaged down. Counter resets (server restart) never produce a negative rate.
+/// Converts a monotonically increasing counter into a tok/s rate. There is no
+/// averaging: each non-zero interval is shown as-is. When the counter stops
+/// increasing (rate would be 0), the last non-zero value is HELD for
+/// <c>holdSeconds</c> (default 2 s) before showing a real zero, so a busy
+/// generator never flickers to 0 between token batches. A fresh non-zero
+/// interval resets the hold and is shown immediately. Counter resets (server
+/// restart) never produce a negative rate.
 /// </summary>
-public sealed class RateCalculator(double windowSeconds = 2.0)
+public sealed class RateCalculator(double holdSeconds = 2.0)
 {
-    private readonly double _windowSeconds = Math.Clamp(windowSeconds, 0.5, 30.0);
-    private readonly Queue<(long Ticks, double Counter)> _window = new();
+    private readonly double _holdSeconds = Math.Clamp(holdSeconds, 0.1, 60.0);
 
     private double? _lastCounter;
-    private long _lastTicks;            // Stopwatch ticks (monotonic)
+    private long _lastTicks;              // Stopwatch ticks (monotonic)
     private bool _hasDisplay;
     private double _display;
 
-    public const double DefaultWindowSeconds = 2.0;
+    private double _lastNonZero;
+    private long _lastNonZeroTicks;
 
-    /// <summary>Seconds spanned by the rolling window of the last sample (diagnostics).</summary>
+    public const double DefaultHoldSeconds = 2.0;
+
+    /// <summary>Seconds between the last two accepted samples (diagnostics).</summary>
     public double LastDtSeconds { get; private set; }
 
     /// <param name="counter">Cumulative counter value.</param>
     /// <param name="stopwatchTicks">Monotonic clock reading for this sample.</param>
     public MetricValue<double> Update(double counter, long stopwatchTicks)
     {
-        // Counter reset (server restart). Discard the window, re-baseline.
+        // Counter reset (server restart). Discard state, re-baseline.
         if (_lastCounter.HasValue && counter < _lastCounter.Value - 1e-9)
         {
-            _window.Clear();
-            _window.Enqueue((stopwatchTicks, counter));
             _lastCounter = counter;
             _lastTicks = stopwatchTicks;
             _hasDisplay = false;
             _display = 0;
+            _lastNonZero = 0;
+            _lastNonZeroTicks = 0;
             return MetricValue<double>.Approx(0, MetricSource.Derived, "counter reset; baseline reset");
         }
 
         if (_lastCounter is null)
         {
-            _window.Enqueue((stopwatchTicks, counter));
             _lastCounter = counter;
             _lastTicks = stopwatchTicks;
-            return MetricValue<double>.None; // no interval yet — never invent a number
+            _lastNonZeroTicks = stopwatchTicks;
+            return MetricValue<double>.None; // no interval yet — not a rate
         }
 
+        double dt = (double)(stopwatchTicks - _lastTicks) / Stopwatch.Frequency;
         double delta = counter - _lastCounter.Value;
-        bool nonzero = delta > 1e-9;
-        bool wasZero = _hasDisplay && _display <= 1e-9;
-
-        _window.Enqueue((stopwatchTicks, counter));
-
-        // Drop samples older than the window, always keeping at least two.
-        long cutoff = stopwatchTicks - (long)(_windowSeconds * Stopwatch.Frequency);
-        while (_window.Count > 2 && _window.Peek().Ticks < cutoff)
-            _window.Dequeue();
-
-        // Idle → non-zero: drop the stale flat samples so the fresh rate shows
-        // immediately instead of being averaged down by the idle window.
-        if (wasZero && nonzero)
-        {
-            while (_window.Count > 2) _window.Dequeue();
-        }
-        else
-        {
-            // Re-prune after hypothetical reset to keep the window accurate.
-            while (_window.Count > 2 && _window.Peek().Ticks < cutoff)
-                _window.Dequeue();
-        }
-
-        var oldest = _window.Peek();
-        double winDt = (double)(stopwatchTicks - oldest.Ticks) / Stopwatch.Frequency;
-        double winDelta = counter - oldest.Counter;
 
         _lastCounter = counter;
         _lastTicks = stopwatchTicks;
-        LastDtSeconds = winDt;
+        LastDtSeconds = dt;
 
-        string note = $"avg over {winDt:0.#}s";
+        if (dt <= 0.0005)
+            return CurrentOrNone();
 
-        if (winDt <= 0.0005)
+        MetricValue<double> result;
+        if (delta > 1e-9)
         {
-            // Too soon to compute — hold any prior value, else stay silent.
-            return _hasDisplay
-                ? MetricValue<double>.Approx(_display, MetricSource.Derived, note)
-                : MetricValue<double>.None;
+            // Non-zero interval: show it at once and arm the hold timer.
+            double rate = delta / dt;
+            _lastNonZero = rate;
+            _lastNonZeroTicks = stopwatchTicks;
+            _display = rate;
+            _hasDisplay = true;
+            result = MetricValue<double>.Approx(rate, MetricSource.Derived, $"rate over {dt:0.#}s");
         }
-
-        if (winDelta <= 1e-9)
+        else if (_hasDisplay && stopwatchTicks - _lastNonZeroTicks < (long)(_holdSeconds * Stopwatch.Frequency))
         {
-            // Nothing progressed across the whole window: real zero.
+            // No progress, but within the hold window: keep the last non-zero.
+            _display = _lastNonZero;
+            result = MetricValue<double>.Approx(_lastNonZero, MetricSource.Derived, "holding last rate");
+        }
+        else
+        {
+            // Confirmed idle past the hold window: real zero.
             _display = 0;
             _hasDisplay = true;
-            return MetricValue<double>.Approx(0, MetricSource.Derived, note);
+            result = MetricValue<double>.Approx(0, MetricSource.Derived, "idle");
         }
 
-        double rate = winDelta / winDt;
-        _display = rate;
-        _hasDisplay = true;
-        return MetricValue<double>.Approx(rate, MetricSource.Derived, note);
+        return result;
+
+        MetricValue<double> CurrentOrNone() =>
+            _hasDisplay ? MetricValue<double>.Approx(_display, MetricSource.Derived, "too soon") : MetricValue<double>.None;
     }
 
     /// <summary>Call when the backend identity changed or state was lost.</summary>
     public void Reset()
     {
-        _window.Clear();
         _lastCounter = null;
         _lastTicks = 0;
         _hasDisplay = false;
         _display = 0;
+        _lastNonZero = 0;
+        _lastNonZeroTicks = 0;
     }
 
     internal static readonly long StopwatchTicksPerSecond = System.Diagnostics.Stopwatch.Frequency;
