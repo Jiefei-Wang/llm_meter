@@ -88,14 +88,14 @@
                 </Grid.RowDefinitions>
 
                 <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource MetricLabel}" Text="Running"/>
-                <TextBlock Grid.Row="0" Grid.Column="1" x:Name="RunningValue" Style="{StaticResource MetricValue}" Text="—" MinWidth="34"/>
+                <TextBlock Grid.Row="0" Grid.Column="1" x:Name="RunningValue" Style="{StaticResource MetricValue}" Text="{Binding RunningText}" MinWidth="34"/>
                 <TextBlock Grid.Row="0" Grid.Column="3" Style="{StaticResource MetricLabel}" Text="Queue"/>
-                <TextBlock Grid.Row="0" Grid.Column="4" x:Name="QueueValue" Style="{StaticResource MetricValue}" Text="—" MinWidth="34"/>
+                <TextBlock Grid.Row="0" Grid.Column="4" x:Name="QueueValue" Style="{StaticResource MetricValue}" Text="{Binding QueueText}" MinWidth="34"/>
 
                 <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource MetricLabel}" Text="Prefill"/>
-                <TextBlock Grid.Row="1" Grid.Column="1" x:Name="PrefillValue" Style="{StaticResource MetricValue}" Text="—" MinWidth="52"/>
+                <TextBlock Grid.Row="1" Grid.Column="1" x:Name="PrefillValue" Style="{StaticResource MetricValue}" Text="{Binding PrefillText}" MinWidth="52"/>
                 <TextBlock Grid.Row="1" Grid.Column="3" Style="{StaticResource MetricLabel}" Text="Generate"/>
-                <TextBlock Grid.Row="1" Grid.Column="4" x:Name="GenerateValue" Style="{StaticResource MetricValue}" Text="—" MinWidth="52"/>
+                <TextBlock Grid.Row="1" Grid.Column="4" x:Name="GenerateValue" Style="{StaticResource MetricValue}" Text="{Binding GenerateText}" MinWidth="52"/>
             </Grid>
 
             <!-- Expanded: separator -->
@@ -128,9 +128,9 @@
                 </Grid.ColumnDefinitions>
                 <TextBlock Grid.Column="0" Style="{StaticResource MetricLabel}" Text="TTFT₁₀"/>
                 <TextBlock Grid.Column="1" x:Name="TtftValue" Style="{StaticResource MetricValue}"
-                           HorizontalAlignment="Left" Margin="6,0,0,0" Text="—"/>
+                           HorizontalAlignment="Left" Margin="6,0,0,0" Text="{Binding TtftText}"/>
                 <TextBlock Grid.Column="2" Style="{StaticResource MetricLabel}" Text="KV"/>
-                <TextBlock Grid.Column="3" x:Name="KvValue" Style="{StaticResource MetricValue}" Text="—" MinWidth="30"/>
+                <TextBlock Grid.Column="3" x:Name="KvValue" Style="{StaticResource MetricValue}" Text="{Binding KvText}" MinWidth="30"/>
             </Grid>
         </Grid>
     </Border>
