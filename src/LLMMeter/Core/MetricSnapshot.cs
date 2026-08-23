@@ -31,6 +31,9 @@ public sealed class MetricSnapshot
     public MetricValue<double> KvCacheUsage { get; init; } = MetricValue<double>.None;   // 0..1
     public MetricValue<double> RecentTtftMs { get; init; } = MetricValue<double>.None;   // rolling window
 
+    /// <summary>Cumulative output tokens generated since monitoring began.</summary>
+    public MetricValue<long> GeneratedTokensTotal { get; init; } = MetricValue<long>.None;
+
     /// <summary>null => enumeration not supported at all (show "details unavailable").</summary>
     public IReadOnlyList<RequestSnapshot>? Requests { get; init; }
 

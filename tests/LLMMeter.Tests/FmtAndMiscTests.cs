@@ -102,3 +102,42 @@ public class PortMappingTests
         Assert.Equal("0.0.0.0", WindowsProcessDiscovery.FormatV4(0x00000000));
     }
 }
+
+public class WidgetMetricFormattingTests
+{
+    private readonly LLMMeter.UI.MonitorWindowViewModel _vm = new();
+
+    private static MetricSnapshot Snap(
+        MetricValue<int>? running = null, MetricValue<int>? queued = null,
+        MetricValue<long>? generated = null) => new()
+    {
+        Timestamp = DateTimeOffset.Now,
+        State = ConnectionState.Limited,
+        Kind = BackendKind.LlamaCpp,
+        Running = running ?? MetricValue<int>.None,
+        Queued = queued ?? MetricValue<int>.None,
+        GeneratedTokensTotal = generated ?? MetricValue<long>.None,
+    };
+
+    [Fact]
+    public void Running_Queue_Combine_As_X_Over_Y()
+    {
+        Assert.Equal("1/0", _vm.MetricRunningQueue(Snap(running: MetricValue<int>.Exact(1), queued: MetricValue<int>.Exact(0))));
+        Assert.Equal("2/3", _vm.MetricRunningQueue(Snap(running: MetricValue<int>.Exact(2), queued: MetricValue<int>.Exact(3))));
+    }
+
+    [Fact]
+    public void Queue_Unavailable_Shows_Running_Over_Dash()
+    {
+        // llama.cpp /slots exposes no queue → honest "x/—"
+        Assert.Equal("1/—", _vm.MetricRunningQueue(Snap(running: MetricValue<int>.Exact(1))));
+    }
+
+    [Fact]
+    public void Generated_Total_Uses_Compact_Units()
+    {
+        Assert.Equal("~12.4k", _vm.MetricGeneratedTotal(Snap(generated: MetricValue<long>.Approx(12400))));
+        Assert.Equal("~1.28M", _vm.MetricGeneratedTotal(Snap(generated: MetricValue<long>.Approx(1280000))));
+        Assert.Equal("—", _vm.MetricGeneratedTotal(Snap()));
+    }
+}

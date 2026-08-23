@@ -17,7 +17,6 @@ public sealed class LlamaCppAdapter : IBackendAdapter
     private readonly RateCalculator _prefill = new();
     private readonly RateCalculator _gen = new();
     private readonly SlotTracker _slots = new();
-
     // /metrics state
     private bool? _metricsEnabled;
     private long _lastTicks;
@@ -25,6 +24,11 @@ public sealed class LlamaCppAdapter : IBackendAdapter
     // /props state
     private int? _totalSlots;
     private string? _modelPath;
+
+    // Cumulative generated tokens (since monitoring began). We sum positive
+    // n_decoded increments per slot; a reset between tasks never subtracts.
+    private readonly Dictionary<int, long> _slotLastDecoded = new();
+    private long _generatedTotal;
 
     internal static readonly string[] ProcessingNames = ["llamacpp:requests_processing"];
     internal static readonly string[] DeferredNames = ["llamacpp:requests_deferred"];
@@ -173,6 +177,9 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             GenerationTokPerSec = genRate,
             KvCacheUsage = kv,
             RecentTtftMs = MetricValue<double>.None,
+            GeneratedTokensTotal = genC.HasValue
+                ? MetricValue<long>.Approx((long)genC.Value, MetricSource.NativeMetrics, "llamacpp:tokens_predicted_total")
+                : MetricValue<long>.None,
             Requests = null,
             ModelName = _modelPath,
             Info = info,
@@ -184,6 +191,7 @@ public sealed class LlamaCppAdapter : IBackendAdapter
         int processing = 0;
         var requests = new List<RequestSnapshot>();
         double decodedTotal = 0;
+        double prefillProcessedTotal = 0;
 
         foreach (var slot in arr.EnumerateArray())
         {
@@ -200,14 +208,26 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             long nPrompt = slot.TryGetProperty("n_prompt_tokens", out var np) && np.ValueKind == JsonValueKind.Number ? np.GetInt64() : -1;
             decodedTotal += Math.Max(0, nDecoded);
 
+            // Accumulate positive n_decoded deltas toward the running total.
+            if (nDecoded >= 0 && _slotLastDecoded.TryGetValue(id, out var prev))
+            {
+                if (nDecoded > prev) _generatedTotal += nDecoded - prev;
+            }
+            _slotLastDecoded[id] = nDecoded;
+
+            // Prefill progress is tracked only while the slot is actually
+            // processing; once generation begins the processed count is static.
+            if (isProcessing)
+                prefillProcessedTotal += ReadNProcessed(slot);
+
             var req = _slots.Observe(id, task, nPrompt, nDecoded, now, isProcessing);
             if (req != null && isProcessing) requests.Add(req);
         }
 
         // Aggregate generation rate from total decoded tokens across slots.
         var genRate = _gen.Update(decodedTotal, now);
-        // Prefill & queue are NOT derivable from /slots — remain unavailable.
-        var prefillRate = MetricValue<double>.None;
+        // Aggregate prefill rate from total prompt tokens processed across slots.
+        var prefillRate = _prefill.Update(prefillProcessedTotal, now);
         var running = processing > 0 || arr.GetArrayLength() >= 0
             ? MetricValue<int>.Exact(processing, MetricSource.NativeApi, "/slots processing count")
             : MetricValue<int>.Exact(0, MetricSource.NativeApi, "/slots");
@@ -229,6 +249,9 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             GenerationTokPerSec = genRate,
             KvCacheUsage = MetricValue<double>.None,
             RecentTtftMs = MetricValue<double>.None,
+            GeneratedTokensTotal = _generatedTotal > 0
+                ? MetricValue<long>.Approx(_generatedTotal, MetricSource.Derived, "since monitoring began")
+                : MetricValue<long>.None,
             Requests = requests.Count > 0 || HasAnyProcessing(arr) ? requests : Array.Empty<RequestSnapshot>(),
             ModelName = _modelPath,
             Info = info,
@@ -241,6 +264,13 @@ public sealed class LlamaCppAdapter : IBackendAdapter
                     return true;
             return false;
         }
+    }
+
+    internal static long ReadNProcessed(JsonElement slot)
+    {
+        if (slot.TryGetProperty("n_prompt_tokens_processed", out var np) && np.ValueKind == JsonValueKind.Number)
+            return np.GetInt64();
+        return -1;
     }
 
     internal static long ReadNDecoded(JsonElement slot)

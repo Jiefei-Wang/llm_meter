@@ -30,7 +30,7 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
     public string StatusToolTip { get; private set; } = "Connecting";
     public Brush StatusBrush { get; private set; } = Brushes.Gray;
     public string RunningText { get; private set; } = "—";
-    public string QueueText { get; private set; } = "—";
+    public string GeneratedText { get; private set; } = "—";
     public string PrefillText { get; private set; } = "—";
     public string GenerateText { get; private set; } = "—";
     public string TtftText { get; private set; } = "—";
@@ -42,6 +42,11 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
     public Visibility ModelsTextVisibility { get; private set; } = Visibility.Collapsed;
     public Visibility MoreTextVisibility { get; private set; } = Visibility.Collapsed;
     public string StateToolTip { get; private set; } = "";
+
+    /// <summary>Tooltip text for the running/queued metric (explains x/y).</summary>
+    public string RunningToolTip { get; private set; } = "";
+    /// <summary>Tooltip text for the generated-total metric.</summary>
+    public string GeneratedToolTip { get; private set; } = "";
 
     /// <summary>Attach to a collector (shared — no duplicate polling).</summary>
     public void Bind(BackendCollector collector, BackendRegistry.TargetEntry entry)
@@ -89,10 +94,10 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
 
         SetState(s.State, s);
 
-        RunningText = MetricInt(s.Running, "running requests");
-        QueueText = MetricInt(s.Queued, "queued requests");
+        RunningText = MetricRunningQueue(s);
         PrefillText = MetricRate(s.PrefillTokPerSec, "prefill");
         GenerateText = MetricRate(s.GenerationTokPerSec, "generation");
+        GeneratedText = MetricGeneratedTotal(s);
 
         TtftText = s.RecentTtftMs.HasValue ? Fmt.Metric(s.RecentTtftMs, Fmt.Milliseconds) : "—";
         KvText = s.KvCacheUsage.HasValue ? Fmt.Metric(s.KvCacheUsage, Fmt.Percent) : "—";
@@ -182,10 +187,36 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
     internal static string MetricRate(MetricValue<double> v, string what) =>
         v.HasValue ? Fmt.Metric(v, Fmt.Rate) : "—";
 
+    /// <summary>Running/queued as "x/y". Queued unavailable → "x/—".</summary>
+    internal string MetricRunningQueue(MetricSnapshot s)
+    {
+        string run = s.Running.HasValue ? s.Running.Value.ToString() : "—";
+        string queued = MetricInt(s.Queued, "queued");
+        RunningToolTip = s.Running.HasValue && s.Queued.HasValue
+            ? $"{s.Running.Value} running / {s.Queued.Value} queued"
+            : s.Running.HasValue
+                ? $"{s.Running.Value} running (queue unavailable)"
+                : "no activity data";
+        return $"{run}/{queued}";
+    }
+
+    /// <summary>Cumulative generated tokens, compact K/M units.</summary>
+    internal string MetricGeneratedTotal(MetricSnapshot s)
+    {
+        if (!s.GeneratedTokensTotal.HasValue) { GeneratedToolTip = "—"; return "—"; }
+        long v = s.GeneratedTokensTotal.Value;
+        GeneratedToolTip = s.GeneratedTokensTotal.Quality == MetricQuality.Approximate
+            ? $"~{v:N0} tokens generated since monitoring began"
+            : $"{v:N0} tokens generated";
+        return s.GeneratedTokensTotal.Quality == MetricQuality.Approximate
+            ? "~" + Fmt.Tokens(v) : Fmt.Tokens(v);
+    }
+
     private void RaiseAll()
     {
         P(nameof(StatusBrush)); P(nameof(StatusToolTip));
-        P(nameof(RunningText)); P(nameof(QueueText));
+        P(nameof(RunningText)); P(nameof(GeneratedText));
+        P(nameof(RunningToolTip)); P(nameof(GeneratedToolTip));
         P(nameof(PrefillText)); P(nameof(GenerateText));
         P(nameof(TtftText)); P(nameof(KvText));
         P(nameof(MoreText)); P(nameof(ModelsInfoText));

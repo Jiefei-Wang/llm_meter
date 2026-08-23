@@ -6,7 +6,8 @@ namespace LLMMeter.Tests;
 
 public class RateCalculatorTests
 {
-    private static long Ticks(double seconds) => (long)(seconds * System.Diagnostics.Stopwatch.Frequency);
+    private static readonly long F = System.Diagnostics.Stopwatch.Frequency;
+    private static long Ticks(double seconds) => (long)(seconds * F);
 
     [Fact]
     public void First_Sample_Has_No_Rate()
@@ -17,7 +18,7 @@ public class RateCalculatorTests
     }
 
     [Fact]
-    public void Normal_Increments_Produce_Positive_Rate()
+    public void Second_Sample_Produces_Positive_Rate()
     {
         var rc = new RateCalculator();
         rc.Update(0, Ticks(0));
@@ -30,46 +31,59 @@ public class RateCalculatorTests
     }
 
     [Fact]
-    public void Irregular_Intervals_Are_Handled_With_Actual_Dt()
+    public void Rolling_Two_Second_Average_Is_Used()
     {
-        var rc = new RateCalculator(emaAlpha: 1.0); // no smoothing for exact math
+        var rc = new RateCalculator();
         rc.Update(0, Ticks(0));
 
-        // 100 tokens in 0.25 s → 400 tok/s
-        var v1 = rc.Update(100, Ticks(0.25));
-        Assert.InRange(v1.Value, 399, 401);
+        // Steady 500 tok/s: +250 every 0.5s for 4 samples (2s window)
+        for (int i = 1; i <= 4; i++)
+            rc.Update(250L * i, Ticks(0.5 * i));
 
-        // 300 more tokens in 2 s → 150 tok/s
-        var v2 = rc.Update(400, Ticks(2.25));
-        Assert.InRange(v2.Value, 149, 151);
+        // raw rate per interval is 500; averaged over the window stays ~500
+        var avg = rc.Update(250L * 5, Ticks(0.5 * 5));
+        Assert.InRange(avg.Value, 400, 600);
     }
 
     [Fact]
-    public void Zero_Increment_Displays_Real_Zero_After_Two_Stale_Samples()
+    public void Idle_Then_NonZero_Jumps_Immediately_No_Averaging_Down()
     {
-        var rc = new RateCalculator(emaAlpha: 1.0);
+        var rc = new RateCalculator();
         rc.Update(0, Ticks(0));
-        var busy = rc.Update(500, Ticks(1));
-        Assert.True(busy.Value > 0);
+        rc.Update(500, Ticks(1));  // busy: 500 tok/s
 
-        // one unchanged sample: still shows last value (no flicker to zero)
-        var stale1 = rc.Update(500, Ticks(2));
-        Assert.True(stale1.Value > 0);
+        // two flat samples → real zero
+        rc.Update(500, Ticks(2));
+        var zero = rc.Update(500, Ticks(3));
+        Assert.Equal(0, zero.Value);
 
-        // second unchanged sample: confirmed idle → exactly 0
-        var stale2 = rc.Update(500, Ticks(3));
-        Assert.Equal(0, stale2.Value);
-        Assert.Equal(0, rc.Update(500, Ticks(4)).Value);
-
-        // work resumes
-        var resumed = rc.Update(700, Ticks(5));
+        // work resumes with a big jump in 0.5s: must show the fresh rate at once
+        // (should NOT be dragged down by the idle window averaging toward 0)
+        var resumed = rc.Update(700, Ticks(3.5));
         Assert.True(resumed.Value > 0);
+        Assert.InRange(resumed.Value, 350, 450); // 200 tokens / 0.5s = 400 tok/s
+    }
+
+    [Fact]
+    public void Idle_Over_Window_Shows_Zero()
+    {
+        var rc = new RateCalculator();
+        rc.Update(0, Ticks(0));
+        rc.Update(500, Ticks(1));
+
+        // 2s window still contains the busy interval: the average decays, not zeroes
+        var decayed = rc.Update(500, Ticks(2));
+        Assert.True(decayed.Value > 0);
+
+        // once the busy interval leaves the 2s window, the average is a true zero
+        var s2 = rc.Update(500, Ticks(3));
+        Assert.Equal(0, s2.Value);
     }
 
     [Fact]
     public void Counter_Reset_Never_Produces_Negative_Rate()
     {
-        var rc = new RateCalculator(emaAlpha: 1.0);
+        var rc = new RateCalculator();
         rc.Update(100_000, Ticks(0));
 
         var before = rc.Update(101_000, Ticks(1));
@@ -85,14 +99,20 @@ public class RateCalculatorTests
     }
 
     [Fact]
-    public void Ema_Smooths_Spikes()
+    public void Within_Window_Unchanged_Holds_Value_Until_Window_Exhausted()
     {
-        var rc = new RateCalculator(emaAlpha: 0.35);
-        rc.Update(0, Ticks(0));
-        rc.Update(1000, Ticks(1)); // ~1000 tok/s
-        var smoothed = rc.Update(2000, Ticks(2)); // raw 1000 again; ema stays near 1000
+        var rc = new RateCalculator();
+        rc.Update(100, Ticks(0));
+        var busy = rc.Update(200, Ticks(0.5)); // 200 tok/s instant
+        Assert.True(busy.Value > 0);
 
-        // with equal raw inputs the EMA converges toward the raw rate, never exceeds it wildly
-        Assert.InRange(smoothed.Value, 800, 1200);
+        // one flat sample following a busy one: window still contains the busy
+        // interval, so the average is not yet zero
+        var next = rc.Update(200, Ticks(1.0));
+        Assert.True(next.Value > 0);
+
+        // enough flat samples to push the busy interval out of the 2s window
+        var far = rc.Update(200, Ticks(3.0));
+        Assert.Equal(0, far.Value);
     }
 }
