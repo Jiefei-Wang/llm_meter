@@ -34,6 +34,9 @@ public sealed class MetricSnapshot
     /// <summary>Cumulative output tokens generated since monitoring began.</summary>
     public MetricValue<long> GeneratedTokensTotal { get; init; } = MetricValue<long>.None;
 
+    /// <summary>Cumulative prompt tokens prefilled since monitoring began.</summary>
+    public MetricValue<long> PrefilledTokensTotal { get; init; } = MetricValue<long>.None;
+
     /// <summary>null => enumeration not supported at all (show "details unavailable").</summary>
     public IReadOnlyList<RequestSnapshot>? Requests { get; init; }
 

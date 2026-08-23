@@ -30,6 +30,10 @@ public sealed class LlamaCppAdapter : IBackendAdapter
     private readonly Dictionary<int, long> _slotLastDecoded = new();
     private long _generatedTotal;
 
+    // Cumulative prefilled prompt tokens (since monitoring began).
+    private readonly Dictionary<int, long> _slotLastProcessed = new();
+    private long _prefilledTotal;
+
     internal static readonly string[] ProcessingNames = ["llamacpp:requests_processing"];
     internal static readonly string[] DeferredNames = ["llamacpp:requests_deferred"];
     internal static readonly string[] PrefillCounterNames = ["llamacpp:prompt_tokens_total"];
@@ -180,6 +184,9 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             GeneratedTokensTotal = genC.HasValue
                 ? MetricValue<long>.Approx((long)genC.Value, MetricSource.NativeMetrics, "llamacpp:tokens_predicted_total")
                 : MetricValue<long>.None,
+            PrefilledTokensTotal = prefillC.HasValue
+                ? MetricValue<long>.Approx((long)prefillC.Value, MetricSource.NativeMetrics, "llamacpp:prompt_tokens_total")
+                : MetricValue<long>.None,
             Requests = null,
             ModelName = _modelPath,
             Info = info,
@@ -218,7 +225,16 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             // Prefill progress is tracked only while the slot is actually
             // processing; once generation begins the processed count is static.
             if (isProcessing)
+            {
                 prefillProcessedTotal += ReadNProcessed(slot);
+
+                long processed = ReadNProcessed(slot);
+                if (processed >= 0 && _slotLastProcessed.TryGetValue(id, out var prevProc))
+                {
+                    if (processed > prevProc) _prefilledTotal += processed - prevProc;
+                }
+                if (processed >= 0) _slotLastProcessed[id] = processed;
+            }
 
             var req = _slots.Observe(id, task, nPrompt, nDecoded, now, isProcessing);
             if (req != null && isProcessing) requests.Add(req);
@@ -251,6 +267,9 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             RecentTtftMs = MetricValue<double>.None,
             GeneratedTokensTotal = _generatedTotal > 0
                 ? MetricValue<long>.Approx(_generatedTotal, MetricSource.Derived, "since monitoring began")
+                : MetricValue<long>.None,
+            PrefilledTokensTotal = _prefilledTotal > 0
+                ? MetricValue<long>.Approx(_prefilledTotal, MetricSource.Derived, "since monitoring began")
                 : MetricValue<long>.None,
             Requests = requests.Count > 0 || HasAnyProcessing(arr) ? requests : Array.Empty<RequestSnapshot>(),
             ModelName = _modelPath,

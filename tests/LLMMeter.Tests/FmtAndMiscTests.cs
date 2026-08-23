@@ -109,7 +109,7 @@ public class WidgetMetricFormattingTests
 
     private static MetricSnapshot Snap(
         MetricValue<int>? running = null, MetricValue<int>? queued = null,
-        MetricValue<long>? generated = null) => new()
+        MetricValue<long>? generated = null, MetricValue<long>? prefilled = null) => new()
     {
         Timestamp = DateTimeOffset.Now,
         State = ConnectionState.Limited,
@@ -117,6 +117,7 @@ public class WidgetMetricFormattingTests
         Running = running ?? MetricValue<int>.None,
         Queued = queued ?? MetricValue<int>.None,
         GeneratedTokensTotal = generated ?? MetricValue<long>.None,
+        PrefilledTokensTotal = prefilled ?? MetricValue<long>.None,
     };
 
     [Fact]
@@ -139,5 +140,13 @@ public class WidgetMetricFormattingTests
         Assert.Equal("12.4k", _vm.MetricGeneratedTotal(Snap(generated: MetricValue<long>.Approx(12400))));
         Assert.Equal("1.28M", _vm.MetricGeneratedTotal(Snap(generated: MetricValue<long>.Approx(1280000))));
         Assert.Equal("—", _vm.MetricGeneratedTotal(Snap()));
+    }
+
+    [Fact]
+    public void Prefilled_Total_Uses_Compact_Units()
+    {
+        Assert.Equal("5.2k", _vm.MetricPrefilledTotal(Snap(prefilled: MetricValue<long>.Approx(5200))));
+        Assert.Equal("2.4M", _vm.MetricPrefilledTotal(Snap(prefilled: MetricValue<long>.Approx(2400000))));
+        Assert.Equal("—", _vm.MetricPrefilledTotal(Snap()));
     }
 }

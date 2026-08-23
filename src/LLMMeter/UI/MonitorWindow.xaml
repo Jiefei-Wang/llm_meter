@@ -122,6 +122,7 @@
             <Grid Grid.Row="5" x:Name="BottomStats" Margin="2,3,2,0" Visibility="Collapsed">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                     <ColumnDefinition Width="Auto"/>
@@ -129,8 +130,11 @@
                 <TextBlock Grid.Column="0" Style="{StaticResource MetricLabel}" Text="TTFT₁₀"/>
                 <TextBlock Grid.Column="1" x:Name="TtftValue" Style="{StaticResource MetricValue}"
                            HorizontalAlignment="Left" Margin="6,0,0,0" Text="{Binding TtftText}"/>
-                <TextBlock Grid.Column="2" Style="{StaticResource MetricLabel}" Text="KV"/>
-                <TextBlock Grid.Column="3" x:Name="KvValue" Style="{StaticResource MetricValue}" Text="{Binding KvText}" MinWidth="30"/>
+                <TextBlock Grid.Column="2" Style="{StaticResource MetricLabel}" Text="Prefilled"
+                           HorizontalAlignment="Right" Margin="10,0,0,0"/>
+                <TextBlock Grid.Column="3" x:Name="PrefilledValue" Style="{StaticResource MetricValue}"
+                           Text="{Binding PrefilledText}" ToolTip="{Binding PrefilledToolTip}" MinWidth="30"/>
+                <TextBlock Grid.Column="4" Style="{StaticResource MetricLabel}" Text="KV" Margin="10,0,0,0"/>
             </Grid>
         </Grid>
     </Border>

@@ -35,6 +35,8 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
     public string GenerateText { get; private set; } = "—";
     public string TtftText { get; private set; } = "—";
     public string KvText { get; private set; } = "—";
+    public string PrefilledText { get; private set; } = "—";
+    public string PrefilledToolTip { get; private set; } = "";
     public string MoreText { get; private set; } = "";
     public string ModelsInfoText { get; private set; } = "";
     public Visibility InfoButtonVisibility { get; private set; } = Visibility.Collapsed;
@@ -101,6 +103,7 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
 
         TtftText = s.RecentTtftMs.HasValue ? Fmt.Metric(s.RecentTtftMs, Fmt.Milliseconds) : "—";
         KvText = s.KvCacheUsage.HasValue ? Fmt.Metric(s.KvCacheUsage, Fmt.Percent) : "—";
+        PrefilledText = MetricPrefilledTotal(s);
 
         // Requests area (expanded)
         RequestRows.Clear();
@@ -209,6 +212,15 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
         return Fmt.Tokens(v);
     }
 
+    /// <summary>Cumulative prefilled prompt tokens, compact K/M units.</summary>
+    internal string MetricPrefilledTotal(MetricSnapshot s)
+    {
+        if (!s.PrefilledTokensTotal.HasValue) { PrefilledToolTip = "—"; return "—"; }
+        long v = s.PrefilledTokensTotal.Value;
+        PrefilledToolTip = $"{v:N0} prompt tokens prefilled since monitoring began";
+        return Fmt.Tokens(v);
+    }
+
     private void RaiseAll()
     {
         P(nameof(StatusBrush)); P(nameof(StatusToolTip));
@@ -216,6 +228,7 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
         P(nameof(RunningToolTip)); P(nameof(GeneratedToolTip));
         P(nameof(PrefillText)); P(nameof(GenerateText));
         P(nameof(TtftText)); P(nameof(KvText));
+        P(nameof(PrefilledText)); P(nameof(PrefilledToolTip));
         P(nameof(MoreText)); P(nameof(ModelsInfoText));
         P(nameof(InfoButtonVisibility)); P(nameof(RequestsAreaVisibility));
         P(nameof(ModelsTextVisibility)); P(nameof(MoreTextVisibility));
