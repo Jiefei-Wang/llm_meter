@@ -136,8 +136,8 @@ public class WidgetMetricFormattingTests
     [Fact]
     public void Generated_Total_Uses_Compact_Units()
     {
-        Assert.Equal("~12.4k", _vm.MetricGeneratedTotal(Snap(generated: MetricValue<long>.Approx(12400))));
-        Assert.Equal("~1.28M", _vm.MetricGeneratedTotal(Snap(generated: MetricValue<long>.Approx(1280000))));
+        Assert.Equal("12.4k", _vm.MetricGeneratedTotal(Snap(generated: MetricValue<long>.Approx(12400))));
+        Assert.Equal("1.28M", _vm.MetricGeneratedTotal(Snap(generated: MetricValue<long>.Approx(1280000))));
         Assert.Equal("—", _vm.MetricGeneratedTotal(Snap()));
     }
 }

@@ -205,11 +205,8 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
     {
         if (!s.GeneratedTokensTotal.HasValue) { GeneratedToolTip = "—"; return "—"; }
         long v = s.GeneratedTokensTotal.Value;
-        GeneratedToolTip = s.GeneratedTokensTotal.Quality == MetricQuality.Approximate
-            ? $"~{v:N0} tokens generated since monitoring began"
-            : $"{v:N0} tokens generated";
-        return s.GeneratedTokensTotal.Quality == MetricQuality.Approximate
-            ? "~" + Fmt.Tokens(v) : Fmt.Tokens(v);
+        GeneratedToolTip = $"{v:N0} tokens generated since monitoring began";
+        return Fmt.Tokens(v);
     }
 
     private void RaiseAll()
