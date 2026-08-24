@@ -3,7 +3,7 @@ using LLMMeter.Core;
 namespace LLMMeter.Adapters;
 
 /// <summary>
-/// Tracks llama.cpp /slots across polls to derive per-slot generation rates.
+/// Tracks llama.cpp /slots across polls to derive per-slot prefill and generation rates.
 /// Rates are only computed while the same task continues on a slot
 /// (id_task unchanged); task changes re-baseline instead of inventing numbers.
 /// </summary>
@@ -13,9 +13,12 @@ public sealed class SlotTracker(double emaAlpha = 0.35)
     {
         public long TaskId;
         public long LastDecoded;
+        public long LastPrefilled;
         public long LastTicks;
-        public double Ema;
-        public bool HasEma;
+        public double DecodeEma;
+        public double PrefillEma;
+        public bool HasDecodeEma;
+        public bool HasPrefillEma;
         public bool Seen;
     }
 
@@ -34,31 +37,42 @@ public sealed class SlotTracker(double emaAlpha = 0.35)
             _states[slotId] = st;
         }
 
-        MetricValue<double> rate = MetricValue<double>.None;
+        MetricValue<double> decodeRate = MetricValue<double>.None;
+        MetricValue<double> prefillRate = MetricValue<double>.None;
 
-        if (decoded >= 0)
+        if (!st.Seen || st.TaskId != taskId)
         {
-            if (!st.Seen || st.TaskId != taskId)
+            // New task on this slot: baseline without inventing a rate.
+            st.TaskId = taskId;
+            st.LastDecoded = decoded;
+            st.LastPrefilled = prefilledTokens;
+            st.LastTicks = nowTicks;
+            st.HasDecodeEma = false;
+            st.HasPrefillEma = false;
+        }
+        else
+        {
+            double dt = (double)(nowTicks - st.LastTicks) / System.Diagnostics.Stopwatch.Frequency;
+            if (dt > 0.0005)
             {
-                // New task on this slot: baseline without inventing a rate.
-                st.TaskId = taskId;
-                st.LastDecoded = decoded;
-                st.LastTicks = nowTicks;
-                st.HasEma = false;
-            }
-            else
-            {
-                double dt = (double)(nowTicks - st.LastTicks) / System.Diagnostics.Stopwatch.Frequency;
-                if (dt > 0.0005 && decoded >= st.LastDecoded)
+                if (decoded >= 0 && st.LastDecoded >= 0 && decoded >= st.LastDecoded)
                 {
                     double r = (decoded - st.LastDecoded) / dt;
-                    st.Ema = st.HasEma ? _alpha * r + (1 - _alpha) * st.Ema : r;
-                    st.HasEma = true;
-                    rate = MetricValue<double>.Approx(st.Ema, MetricSource.Derived, $"/slots slot {slotId} n_decoded delta");
+                    st.DecodeEma = st.HasDecodeEma ? _alpha * r + (1 - _alpha) * st.DecodeEma : r;
+                    st.HasDecodeEma = true;
+                    decodeRate = MetricValue<double>.Approx(st.DecodeEma, MetricSource.Derived, $"/slots slot {slotId} n_decoded delta");
                 }
-                st.LastDecoded = decoded;
-                st.LastTicks = nowTicks;
+                if (prefilledTokens >= 0 && st.LastPrefilled >= 0 && prefilledTokens >= st.LastPrefilled)
+                {
+                    double r = (prefilledTokens - st.LastPrefilled) / dt;
+                    st.PrefillEma = st.HasPrefillEma ? _alpha * r + (1 - _alpha) * st.PrefillEma : r;
+                    st.HasPrefillEma = true;
+                    prefillRate = MetricValue<double>.Approx(st.PrefillEma, MetricSource.Derived, $"/slots slot {slotId} n_prompt_tokens_processed delta");
+                }
             }
+            st.LastDecoded = decoded;
+            st.LastPrefilled = prefilledTokens;
+            st.LastTicks = nowTicks;
         }
 
         st.Seen = true;
@@ -78,7 +92,8 @@ public sealed class SlotTracker(double emaAlpha = 0.35)
             OutputTokens = decoded >= 0
                 ? MetricValue<long>.Exact(decoded, MetricSource.NativeApi, "/slots")
                 : MetricValue<long>.None,
-            TokensPerSecond = rate,
+            PrefillTokensPerSecond = prefillRate,
+            TokensPerSecond = decodeRate,
         };
     }
 

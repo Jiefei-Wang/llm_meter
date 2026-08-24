@@ -118,7 +118,10 @@ public sealed class RequestRow : INotifyPropertyChanged
         IsCompleted = false;
         IsInformational = false;
         PrimaryText = request.Id;
-        SpeedText = request.TokensPerSecond.HasValue ? CompactRate(request.TokensPerSecond.Value) : "—";
+        var activeRate = request.OutputTokens.HasValue && request.OutputTokens.Value > 0
+            ? request.TokensPerSecond
+            : request.PrefillTokensPerSecond;
+        SpeedText = activeRate.HasValue ? CompactRate(activeRate.Value) : "—";
         MetricsText = FormatMetrics(request);
     }
 

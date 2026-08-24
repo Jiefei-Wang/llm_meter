@@ -37,6 +37,18 @@ public class SlotTrackerTests
     }
 
     [Fact]
+    public void Slot_Continuation_Derives_Prefill_Rate()
+    {
+        var tracker = new SlotTracker(emaAlpha: 1.0);
+        _ = tracker.Observe(0, 100, 1000, 0, Ticks(0), true, prefilledTokens: 100);
+
+        var r = tracker.Observe(0, 100, 1000, 0, Ticks(0.5), true, prefilledTokens: 500);
+
+        Assert.True(r!.PrefillTokensPerSecond.HasValue);
+        Assert.InRange(r.PrefillTokensPerSecond.Value, 799.9, 800.1);
+    }
+
+    [Fact]
     public void Slot_Completion_Stops_Reporting()
     {
         var tracker = new SlotTracker(emaAlpha: 1.0);

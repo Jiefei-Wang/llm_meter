@@ -49,6 +49,7 @@ IN 12.32k · CACHED 512    · EVAL 11.81k · OUT 203
 ```
 
 `IN` is the total prompt represented by cached plus newly evaluated tokens. `CACHED` is reused KV-cache content, `EVAL` is prompt work performed for the request, and `OUT` is generated output.
+The speed beside the task ID shows prompt-evaluation throughput during prefill and automatically switches to decode throughput when output generation begins.
 
 ## Metric integrity
 

@@ -177,13 +177,14 @@ public class ActivityChartTests
 public class RequestSlotListTests
 {
     private static RequestSnapshot Request(string id, long input, long prefilled, long output = 0, long cached = 0,
-        double? rate = null) => new()
+        double? rate = null, double? prefillRate = null) => new()
     {
         Id = id,
         InputTokens = MetricValue<long>.Exact(input),
         CachedTokens = MetricValue<long>.Exact(cached),
         PrefilledTokens = MetricValue<long>.Exact(prefilled),
         OutputTokens = MetricValue<long>.Exact(output),
+        PrefillTokensPerSecond = prefillRate.HasValue ? MetricValue<double>.Approx(prefillRate.Value) : MetricValue<double>.None,
         TokensPerSecond = rate.HasValue ? MetricValue<double>.Approx(rate.Value) : MetricValue<double>.None,
     };
 
@@ -202,6 +203,18 @@ public class RequestSlotListTests
         Assert.DoesNotContain("/s", slots.Rows[0].MetricsText);
         Assert.DoesNotContain("~", slots.Rows[0].SpeedText);
         Assert.DoesNotContain(Environment.NewLine, slots.Rows[0].MetricsText);
+    }
+
+    [Fact]
+    public void Row_Uses_Prefill_Rate_Until_Decode_Starts()
+    {
+        var slots = new RequestSlotList();
+        var now = DateTimeOffset.UtcNow;
+        slots.Update([Request("#1", 1000, 500, output: 0, rate: 0, prefillRate: 800)], now);
+        Assert.Equal("800/s", slots.Rows[0].SpeedText);
+
+        slots.Update([Request("#1", 1000, 1000, output: 1, rate: 42, prefillRate: 0)], now.AddSeconds(1));
+        Assert.Equal("42/s", slots.Rows[0].SpeedText);
     }
 
     [Fact]

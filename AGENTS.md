@@ -61,6 +61,7 @@ Requirements for this line:
 - Each token value reserves six monospace characters and is right-padded when shorter so values remain left-aligned.
 - Put spaces around each `·` separator so it does not touch a value or the following label.
 - Show generation speed immediately after the task ID rather than reserving a separate full-width column. Render all four token statistics on the second line without ellipsis.
+- The request speed is phase-aware: show the derived `n_prompt_tokens_processed` rate during prefill, then switch to the derived `n_decoded` rate after the first output token appears.
 - Do not show the approximate `~` prefix on per-request speed.
 - Keep a constant font size. Do not use a `Viewbox` or dynamic font scaling.
 - Constrain request cards to the metrics-grid/widget width. Long text may use trimming only as a final safety measure; it must never widen the window.

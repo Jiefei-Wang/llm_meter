@@ -16,6 +16,7 @@ public sealed class RequestSnapshot
     public MetricValue<long> CachedTokens { get; init; } = MetricValue<long>.None;
     public MetricValue<long> PrefilledTokens { get; init; } = MetricValue<long>.None;
     public MetricValue<long> OutputTokens { get; init; } = MetricValue<long>.None;
+    public MetricValue<double> PrefillTokensPerSecond { get; init; } = MetricValue<double>.None;
     public MetricValue<double> TokensPerSecond { get; init; } = MetricValue<double>.None;
 }
 
