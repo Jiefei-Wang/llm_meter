@@ -14,7 +14,7 @@ public class SlotTrackerTests
     [Fact]
     public void Slot_Start_Has_No_Rate()
     {
-        var tracker = new SlotTracker(emaAlpha: 1.0);
+        var tracker = new SlotTracker();
         var r = tracker.Observe(slotId: 0, taskId: 100, promptTokens: 42, decoded: 1, nowTicks: Ticks(0), processing: true);
 
         Assert.NotNull(r);
@@ -27,7 +27,7 @@ public class SlotTrackerTests
     [Fact]
     public void Slot_Continuation_Derives_Rate()
     {
-        var tracker = new SlotTracker(emaAlpha: 1.0);
+        var tracker = new SlotTracker();
         _ = tracker.Observe(0, 100, 42, 5, Ticks(0), true);
 
         // 20 more tokens in 0.5 s → 40 tok/s
@@ -39,7 +39,7 @@ public class SlotTrackerTests
     [Fact]
     public void Slot_Continuation_Derives_Prefill_Rate()
     {
-        var tracker = new SlotTracker(emaAlpha: 1.0);
+        var tracker = new SlotTracker();
         _ = tracker.Observe(0, 100, 1000, 0, Ticks(0), true, prefilledTokens: 100);
 
         var r = tracker.Observe(0, 100, 1000, 0, Ticks(0.5), true, prefilledTokens: 500);
@@ -51,7 +51,7 @@ public class SlotTrackerTests
     [Fact]
     public void Slot_Completion_Stops_Reporting()
     {
-        var tracker = new SlotTracker(emaAlpha: 1.0);
+        var tracker = new SlotTracker();
         _ = tracker.Observe(0, 100, 10, 3, Ticks(0), true);
         _ = tracker.Observe(0, 100, 10, 8, Ticks(0.5), true);
 
@@ -63,7 +63,7 @@ public class SlotTrackerTests
     [Fact]
     public void Task_Id_Reuse_Rebaselines_Without_Fake_Rate()
     {
-        var tracker = new SlotTracker(emaAlpha: 1.0);
+        var tracker = new SlotTracker();
         // first request ends with 200 decoded tokens
         _ = tracker.Observe(2, 7, 10, 200, Ticks(0), true);
         _ = tracker.Observe(2, 7, 10, 210, Ticks(1), true); // ~10 tok/s
@@ -83,7 +83,7 @@ public class SlotTrackerTests
     [Fact]
     public void Counter_Reset_On_Same_Task_Never_Goes_Negative()
     {
-        var tracker = new SlotTracker(emaAlpha: 1.0);
+        var tracker = new SlotTracker();
         _ = tracker.Observe(1, 50, 10, 300, Ticks(0), true);
         _ = tracker.Observe(1, 50, 10, 320, Ticks(1), true); // +20
 
@@ -96,7 +96,7 @@ public class SlotTrackerTests
     [Fact]
     public void Multiple_Simultaneous_Slots_Track_Independently()
     {
-        var tracker = new SlotTracker(emaAlpha: 1.0);
+        var tracker = new SlotTracker();
         _ = tracker.Observe(0, 1, 5, 0, Ticks(0), true);
         _ = tracker.Observe(1, 2, 5, 0, Ticks(0), true);
 

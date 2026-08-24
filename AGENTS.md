@@ -35,6 +35,7 @@ Every metric has a `MetricQuality` and `MetricSource`:
 - `Unavailable`: show an em dash; do not substitute zero.
 
 Rates must use monotonic time, handle counter resets, and never report negative throughput. Do not confuse server-wide cumulative counters with per-request values.
+Aggregate prefill and generation snapshots contain the current unsmoothed interval rates. Graph history records those raw values, including zero. Only the numeric cards hold their last non-zero value for two seconds; a fresh non-zero sample replaces the held value immediately.
 
 ### llama.cpp
 

@@ -24,6 +24,8 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged, IDisposable
     private readonly Dispatcher _dispatcher = Dispatcher.CurrentDispatcher;
     private readonly Dictionary<string, object?> _published = new();
     private readonly RateHistory _history = new();
+    private readonly RateDisplayHold _prefillDisplay = new();
+    private readonly RateDisplayHold _generateDisplay = new();
     private readonly RequestSlotList _requestSlots = new();
     private readonly DispatcherTimer _requestStateTimer;
     private bool _showingPrefillHistory = true;
@@ -94,6 +96,8 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged, IDisposable
         _collector = collector;
         _entry = entry;
         _history.Clear();
+        _prefillDisplay.Reset();
+        _generateDisplay.Reset();
         _requestSlots.Clear();
         _lastRendered = null;
         _forceNext = true;
@@ -113,6 +117,8 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged, IDisposable
         _lastRendered = null;
         CurrentHelp = null;
         _history.Clear();
+        _prefillDisplay.Reset();
+        _generateDisplay.Reset();
         HeaderText = "LLM Meter";
         SubtitleText = "select a backend";
         Render(null);
@@ -171,8 +177,8 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged, IDisposable
         UpdateHeader(s.ModelName);
 
         RunningText = MetricRunningQueue(s);
-        PrefillText = MetricRate(s.PrefillTokPerSec, "prefill");
-        GenerateText = MetricRate(s.GenerationTokPerSec, "generation");
+        PrefillText = MetricRate(_prefillDisplay.Update(s.PrefillTokPerSec, s.Timestamp), "prefill");
+        GenerateText = MetricRate(_generateDisplay.Update(s.GenerationTokPerSec, s.Timestamp), "generation");
         GeneratedText = MetricGeneratedTotal(s);
 
         TtftText = s.RecentTtftMs.HasValue ? Fmt.Metric(s.RecentTtftMs, Fmt.Milliseconds) : "—";

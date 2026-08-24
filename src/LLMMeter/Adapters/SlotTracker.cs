@@ -7,7 +7,7 @@ namespace LLMMeter.Adapters;
 /// Rates are only computed while the same task continues on a slot
 /// (id_task unchanged); task changes re-baseline instead of inventing numbers.
 /// </summary>
-public sealed class SlotTracker(double emaAlpha = 0.35)
+public sealed class SlotTracker
 {
     private sealed class SlotState
     {
@@ -15,15 +15,10 @@ public sealed class SlotTracker(double emaAlpha = 0.35)
         public long LastDecoded;
         public long LastPrefilled;
         public long LastTicks;
-        public double DecodeEma;
-        public double PrefillEma;
-        public bool HasDecodeEma;
-        public bool HasPrefillEma;
         public bool Seen;
     }
 
     private readonly Dictionary<int, SlotState> _states = new();
-    private readonly double _alpha = Math.Clamp(emaAlpha, 0.05, 1.0);
 
     public RequestSnapshot? Observe(int slotId, long taskId, long promptTokens, long decoded, long nowTicks,
         bool processing, long prefilledTokens = -1, long cachedTokens = -1)
@@ -47,8 +42,6 @@ public sealed class SlotTracker(double emaAlpha = 0.35)
             st.LastDecoded = decoded;
             st.LastPrefilled = prefilledTokens;
             st.LastTicks = nowTicks;
-            st.HasDecodeEma = false;
-            st.HasPrefillEma = false;
         }
         else
         {
@@ -58,16 +51,12 @@ public sealed class SlotTracker(double emaAlpha = 0.35)
                 if (decoded >= 0 && st.LastDecoded >= 0 && decoded >= st.LastDecoded)
                 {
                     double r = (decoded - st.LastDecoded) / dt;
-                    st.DecodeEma = st.HasDecodeEma ? _alpha * r + (1 - _alpha) * st.DecodeEma : r;
-                    st.HasDecodeEma = true;
-                    decodeRate = MetricValue<double>.Approx(st.DecodeEma, MetricSource.Derived, $"/slots slot {slotId} n_decoded delta");
+                    decodeRate = MetricValue<double>.Approx(r, MetricSource.Derived, $"/slots slot {slotId} n_decoded delta");
                 }
                 if (prefilledTokens >= 0 && st.LastPrefilled >= 0 && prefilledTokens >= st.LastPrefilled)
                 {
                     double r = (prefilledTokens - st.LastPrefilled) / dt;
-                    st.PrefillEma = st.HasPrefillEma ? _alpha * r + (1 - _alpha) * st.PrefillEma : r;
-                    st.HasPrefillEma = true;
-                    prefillRate = MetricValue<double>.Approx(st.PrefillEma, MetricSource.Derived, $"/slots slot {slotId} n_prompt_tokens_processed delta");
+                    prefillRate = MetricValue<double>.Approx(r, MetricSource.Derived, $"/slots slot {slotId} n_prompt_tokens_processed delta");
                 }
             }
             st.LastDecoded = decoded;
