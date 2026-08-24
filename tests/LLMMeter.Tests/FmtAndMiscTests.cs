@@ -310,6 +310,13 @@ public class WidgetMetricFormattingTests
     }
 
     [Fact]
+    public void Aggregate_Rates_Do_Not_Show_Approximate_Prefix()
+    {
+        Assert.Equal("186/s", MonitorWindowViewModel.MetricRate(MetricValue<double>.Approx(186), "prefill"));
+        Assert.Equal("42/s", MonitorWindowViewModel.MetricRate(MetricValue<double>.Approx(42), "generation"));
+    }
+
+    [Fact]
     public void Queue_Unavailable_Shows_Running_Over_Dash()
     {
         // llama.cpp /slots exposes no queue → honest "x/—"

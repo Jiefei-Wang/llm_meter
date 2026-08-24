@@ -338,4 +338,37 @@ public class FingerprintTests
         Assert.Equal(3, request.OutputTokens.Value);
         Assert.True(adapter.Capabilities.HasFlag(BackendCapabilities.ActiveRequestEnumeration));
     }
+
+    [Fact]
+    public void Llama_Metrics_Mode_Prefers_Live_Slot_Rates()
+    {
+        var metrics = new MetricSnapshot
+        {
+            Timestamp = DateTimeOffset.UtcNow,
+            State = ConnectionState.Online,
+            Kind = BackendKind.LlamaCpp,
+            PrefillTokPerSec = MetricValue<double>.Approx(0),
+            GenerationTokPerSec = MetricValue<double>.Approx(0),
+        };
+        RequestSnapshot[] requests =
+        [
+            new()
+            {
+                Id = "#1",
+                PrefillTokensPerSecond = MetricValue<double>.Approx(270),
+                TokensPerSecond = MetricValue<double>.Approx(0),
+            },
+            new()
+            {
+                Id = "#2",
+                PrefillTokensPerSecond = MetricValue<double>.Approx(30),
+                TokensPerSecond = MetricValue<double>.Approx(40),
+            },
+        ];
+
+        var combined = LlamaCppAdapter.WithRequests(metrics, requests);
+
+        Assert.Equal(300, combined.PrefillTokPerSec.Value);
+        Assert.Equal(40, combined.GenerationTokPerSec.Value);
+    }
 }

@@ -164,24 +164,37 @@ public sealed class LlamaCppAdapter : IBackendAdapter
         return requests;
     }
 
-    private static MetricSnapshot WithRequests(MetricSnapshot snapshot, IReadOnlyList<RequestSnapshot> requests) => new()
+    internal static MetricSnapshot WithRequests(MetricSnapshot snapshot, IReadOnlyList<RequestSnapshot> requests)
     {
-        Timestamp = snapshot.Timestamp,
-        State = snapshot.State,
-        Kind = snapshot.Kind,
-        Running = snapshot.Running,
-        Queued = snapshot.Queued,
-        PrefillTokPerSec = snapshot.PrefillTokPerSec,
-        GenerationTokPerSec = snapshot.GenerationTokPerSec,
-        KvCacheUsage = snapshot.KvCacheUsage,
-        RecentTtftMs = snapshot.RecentTtftMs,
-        GeneratedTokensTotal = snapshot.GeneratedTokensTotal,
-        PrefilledTokensTotal = snapshot.PrefilledTokensTotal,
-        Requests = requests,
-        ModelName = snapshot.ModelName,
-        LoadedModels = snapshot.LoadedModels,
-        Info = snapshot.Info,
-    };
+        var livePrefill = SumRates(requests.Select(request => request.PrefillTokensPerSecond));
+        var liveDecode = SumRates(requests.Select(request => request.TokensPerSecond));
+        return new MetricSnapshot
+        {
+            Timestamp = snapshot.Timestamp,
+            State = snapshot.State,
+            Kind = snapshot.Kind,
+            Running = snapshot.Running,
+            Queued = snapshot.Queued,
+            PrefillTokPerSec = livePrefill.HasValue ? livePrefill : snapshot.PrefillTokPerSec,
+            GenerationTokPerSec = liveDecode.HasValue ? liveDecode : snapshot.GenerationTokPerSec,
+            KvCacheUsage = snapshot.KvCacheUsage,
+            RecentTtftMs = snapshot.RecentTtftMs,
+            GeneratedTokensTotal = snapshot.GeneratedTokensTotal,
+            PrefilledTokensTotal = snapshot.PrefilledTokensTotal,
+            Requests = requests,
+            ModelName = snapshot.ModelName,
+            LoadedModels = snapshot.LoadedModels,
+            Info = snapshot.Info,
+        };
+
+        static MetricValue<double> SumRates(IEnumerable<MetricValue<double>> rates)
+        {
+            var available = rates.Where(rate => rate.HasValue).ToArray();
+            return available.Length > 0
+                ? MetricValue<double>.Approx(available.Sum(rate => rate.Value), MetricSource.Derived, "sum of live /slots rates")
+                : MetricValue<double>.None;
+        }
+    }
 
     private MetricSnapshot CollectFromMetrics(
         string body, Dictionary<string, string> info, long now)

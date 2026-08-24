@@ -39,6 +39,7 @@ Rates must use monotonic time, handle counter resets, and never report negative 
 ### llama.cpp
 
 Poll `/metrics` and `/slots` concurrently. `/metrics` supplies aggregate counters/gauges; `/slots` supplies active-request details. Enabling `--metrics` must not disable request enumeration or noticeably serialize the polling path.
+While requests are active, sum the live per-slot prefill and decode rates for the aggregate rate cards because llama-server may defer updating its Prometheus token counters until a request or phase completes. Fall back to counter-derived rates when live slot rates are unavailable.
 
 Important `/slots` semantics:
 
@@ -63,6 +64,7 @@ Requirements for this line:
 - Show generation speed immediately after the task ID rather than reserving a separate full-width column. Render all four token statistics on the second line without ellipsis.
 - The request speed is phase-aware: show the derived `n_prompt_tokens_processed` rate during prefill, then switch to the derived `n_decoded` rate after the first output token appears.
 - Do not show the approximate `~` prefix on per-request speed.
+- Do not show the approximate `~` prefix on the aggregate prefill or generation rates.
 - Keep a constant font size. Do not use a `Viewbox` or dynamic font scaling.
 - Constrain request cards to the metrics-grid/widget width. Long text may use trimming only as a final safety measure; it must never widen the window.
 - Keep request rows stable by task ID. Completed rows linger briefly and empty interior slots are reused before appending rows.

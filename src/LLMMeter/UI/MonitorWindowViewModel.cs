@@ -297,7 +297,7 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged, IDisposable
     }
 
     internal static string MetricRate(MetricValue<double> v, string what) =>
-        v.HasValue ? Fmt.Metric(v, Fmt.Rate) : "—";
+        v.HasValue ? Fmt.Rate(v.Value) : "—";
 
     /// <summary>Running/queued as "x/y". Queued unavailable → "x/—".</summary>
     internal string MetricRunningQueue(MetricSnapshot s)
