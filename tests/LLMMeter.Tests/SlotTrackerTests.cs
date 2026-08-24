@@ -49,6 +49,31 @@ public class SlotTrackerTests
     }
 
     [Fact]
+    public void Batched_Prefill_Uses_Time_Since_Previous_Counter_Change()
+    {
+        var tracker = new SlotTracker();
+        _ = tracker.Observe(0, 100, 10_000, 0, Ticks(0), true, prefilledTokens: 4096);
+        var zero1 = tracker.Observe(0, 100, 10_000, 0, Ticks(0.5), true, prefilledTokens: 4096);
+        var zero2 = tracker.Observe(0, 100, 10_000, 0, Ticks(1.0), true, prefilledTokens: 4096);
+        var batch = tracker.Observe(0, 100, 10_000, 0, Ticks(1.85), true, prefilledTokens: 6144);
+
+        Assert.Equal(0, zero1!.PrefillTokensPerSecond.Value);
+        Assert.Equal(0, zero2!.PrefillTokensPerSecond.Value);
+        Assert.InRange(batch!.PrefillTokensPerSecond.Value, 1106, 1108);
+    }
+
+    [Fact]
+    public void Batched_Decode_Uses_Time_Since_Previous_Counter_Change()
+    {
+        var tracker = new SlotTracker();
+        _ = tracker.Observe(0, 100, 100, 10, Ticks(0), true, prefilledTokens: 100);
+        _ = tracker.Observe(0, 100, 100, 10, Ticks(0.5), true, prefilledTokens: 100);
+        var batch = tracker.Observe(0, 100, 100, 30, Ticks(1.0), true, prefilledTokens: 100);
+
+        Assert.InRange(batch!.TokensPerSecond.Value, 19.9, 20.1);
+    }
+
+    [Fact]
     public void Slot_Completion_Stops_Reporting()
     {
         var tracker = new SlotTracker();

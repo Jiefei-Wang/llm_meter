@@ -64,6 +64,7 @@ Requirements for this line:
 - Put spaces around each `·` separator so it does not touch a value or the following label.
 - Show generation speed immediately after the task ID rather than reserving a separate full-width column. Render all four token statistics on the second line without ellipsis.
 - The request speed is phase-aware: show the derived `n_prompt_tokens_processed` rate during prefill, then switch to the derived `n_decoded` rate after the first output token appears.
+- llama-server may publish slot counters in large batches. Unchanged polls emit raw zero samples but must not advance the counter-change timestamp; divide the next positive delta by the full time since that counter last changed.
 - Do not show the approximate `~` prefix on per-request speed.
 - Do not show the approximate `~` prefix on the aggregate prefill or generation rates.
 - Keep a constant font size. Do not use a `Viewbox` or dynamic font scaling.

@@ -14,7 +14,8 @@ public sealed class SlotTracker
         public long TaskId;
         public long LastDecoded;
         public long LastPrefilled;
-        public long LastTicks;
+        public long LastDecodedTicks;
+        public long LastPrefilledTicks;
         public bool Seen;
     }
 
@@ -41,27 +42,53 @@ public sealed class SlotTracker
             st.TaskId = taskId;
             st.LastDecoded = decoded;
             st.LastPrefilled = prefilledTokens;
-            st.LastTicks = nowTicks;
+            st.LastDecodedTicks = nowTicks;
+            st.LastPrefilledTicks = nowTicks;
         }
         else
         {
-            double dt = (double)(nowTicks - st.LastTicks) / System.Diagnostics.Stopwatch.Frequency;
-            if (dt > 0.0005)
+            if (decoded >= 0 && st.LastDecoded >= 0)
             {
-                if (decoded >= 0 && st.LastDecoded >= 0 && decoded >= st.LastDecoded)
+                if (decoded > st.LastDecoded)
                 {
+                    double dt = (double)(nowTicks - st.LastDecodedTicks) / System.Diagnostics.Stopwatch.Frequency;
                     double r = (decoded - st.LastDecoded) / dt;
-                    decodeRate = MetricValue<double>.Approx(r, MetricSource.Derived, $"/slots slot {slotId} n_decoded delta");
+                    if (dt > 0.0005)
+                        decodeRate = MetricValue<double>.Approx(r, MetricSource.Derived, $"/slots slot {slotId} n_decoded delta");
+                    st.LastDecoded = decoded;
+                    st.LastDecodedTicks = nowTicks;
                 }
-                if (prefilledTokens >= 0 && st.LastPrefilled >= 0 && prefilledTokens >= st.LastPrefilled)
+                else if (decoded == st.LastDecoded)
                 {
-                    double r = (prefilledTokens - st.LastPrefilled) / dt;
-                    prefillRate = MetricValue<double>.Approx(r, MetricSource.Derived, $"/slots slot {slotId} n_prompt_tokens_processed delta");
+                    decodeRate = MetricValue<double>.Approx(0, MetricSource.Derived, $"/slots slot {slotId} n_decoded unchanged");
+                }
+                else
+                {
+                    st.LastDecoded = decoded;
+                    st.LastDecodedTicks = nowTicks;
                 }
             }
-            st.LastDecoded = decoded;
-            st.LastPrefilled = prefilledTokens;
-            st.LastTicks = nowTicks;
+            if (prefilledTokens >= 0 && st.LastPrefilled >= 0)
+            {
+                if (prefilledTokens > st.LastPrefilled)
+                {
+                    double dt = (double)(nowTicks - st.LastPrefilledTicks) / System.Diagnostics.Stopwatch.Frequency;
+                    double r = (prefilledTokens - st.LastPrefilled) / dt;
+                    if (dt > 0.0005)
+                        prefillRate = MetricValue<double>.Approx(r, MetricSource.Derived, $"/slots slot {slotId} n_prompt_tokens_processed delta");
+                    st.LastPrefilled = prefilledTokens;
+                    st.LastPrefilledTicks = nowTicks;
+                }
+                else if (prefilledTokens == st.LastPrefilled)
+                {
+                    prefillRate = MetricValue<double>.Approx(0, MetricSource.Derived, $"/slots slot {slotId} n_prompt_tokens_processed unchanged");
+                }
+                else
+                {
+                    st.LastPrefilled = prefilledTokens;
+                    st.LastPrefilledTicks = nowTicks;
+                }
+            }
         }
 
         st.Seen = true;
