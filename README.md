@@ -44,7 +44,7 @@ LLM Meter places its configuration beside the executable in `LLMMeter.json`. Cor
 The active llama-server request line uses compact, fixed-width fields:
 
 ```text
-IN  12.32k·CACHED   512·EVAL 11.81k·OUT    203·61.4/s
+IN: 12.32k · CACHED: 512    · EVAL: 11.81k · OUT: 203    · 61.4/s
 ```
 
 `IN` is the total prompt represented by cached plus newly evaluated tokens. `CACHED` is reused KV-cache content, `EVAL` is prompt work performed for the request, and `OUT` is generated output.

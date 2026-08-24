@@ -142,9 +142,9 @@ public sealed class RequestRow : INotifyPropertyChanged
         string rate = request.TokensPerSecond.HasValue
             ? Slot(CompactRate(request.TokensPerSecond.Value))
             : Slot("—");
-        return $"IN {input}·CACHED {cached}·EVAL {evaluated}·OUT {output}·{rate}";
+        return $"IN: {input} · CACHED: {cached} · EVAL: {evaluated} · OUT: {output} · {rate}";
 
-        static string Slot(string value) => value.PadLeft(6);
+        static string Slot(string value) => value.PadRight(6);
 
         static string CompactRate(double value) => value switch
         {
