@@ -338,4 +338,16 @@ public class WidgetMetricFormattingTests
         Assert.Equal("2.4M", _vm.MetricPrefilledTotal(Snap(prefilled: MetricValue<long>.Approx(2400000))));
         Assert.Equal("—", _vm.MetricPrefilledTotal(Snap()));
     }
+
+    [Fact]
+    public void Usage_Baselines_Reset_Displayed_Totals()
+    {
+        _vm.SetUsageBaselines(generated: 12_000, prefilled: 20_000);
+        var snapshot = Snap(
+            generated: MetricValue<long>.Approx(12_345),
+            prefilled: MetricValue<long>.Approx(20_678));
+
+        Assert.Equal("345", _vm.MetricGeneratedTotal(snapshot));
+        Assert.Equal("678", _vm.MetricPrefilledTotal(snapshot));
+    }
 }

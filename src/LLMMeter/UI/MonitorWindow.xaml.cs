@@ -69,6 +69,13 @@ public partial class MonitorWindow : Window
     /// <summary>Bind this widget to a backend target (shared collector).</summary>
     public void Bind(BackendRegistry.TargetEntry entry)
     {
+        if (!string.IsNullOrEmpty(Persisted.BackendId) &&
+            !Persisted.BackendId.Equals(entry.Target.GroupKey, StringComparison.OrdinalIgnoreCase))
+        {
+            Persisted.GeneratedUsageBaseline = null;
+            Persisted.PrefilledUsageBaseline = null;
+            _vm.SetUsageBaselines(null, null);
+        }
         var collector = _manager.Registry.Collectors.GetOrAdd(entry.Target.Endpoint, KindOrNull(entry));
         _vm.Bind(collector, entry);
         Persisted.BackendId = entry.Target.GroupKey;
@@ -403,6 +410,16 @@ public partial class MonitorWindow : Window
         rescan.Click += (_, _) => App.Services.Registry.Discovery.TriggerScan();
         menu.Items.Add(rescan);
 
+        var resetUsage = new MenuItem { Header = "Reset Usage" };
+        resetUsage.Click += (_, _) =>
+        {
+            var baselines = _vm.ResetUsage();
+            Persisted.GeneratedUsageBaseline = baselines.Generated;
+            Persisted.PrefilledUsageBaseline = baselines.Prefilled;
+            _manager.QueueSave();
+        };
+        menu.Items.Add(resetUsage);
+
         menu.Items.Add(new Separator());
         var hide = new MenuItem { Header = "Hide" };
         hide.Click += (_, _) => Hide();
@@ -477,6 +494,9 @@ public partial class MonitorWindow : Window
     internal void RestorePersisted(WindowStateConfig cfg)
     {
         Persisted.BackendId = cfg.BackendId;
+        Persisted.GeneratedUsageBaseline = cfg.GeneratedUsageBaseline;
+        Persisted.PrefilledUsageBaseline = cfg.PrefilledUsageBaseline;
+        _vm.SetUsageBaselines(cfg.GeneratedUsageBaseline, cfg.PrefilledUsageBaseline);
         SetAlwaysOnTop(cfg.Topmost, queueSave: false);
 
         // Defensive bounds restore (display may have changed).

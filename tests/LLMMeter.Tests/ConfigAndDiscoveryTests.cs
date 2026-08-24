@@ -50,6 +50,7 @@ public class ConfigParsingTests : IDisposable
         {
             BackendId = "manual|192.168.1.31:8000",
             X = 120, Y = 80, Scale = 1.37, RequestListHeight = 222, Expanded = true, Topmost = true,
+            GeneratedUsageBaseline = 1200, PrefilledUsageBaseline = 3400,
         });
         writeSvc.Save(original);
 
@@ -67,6 +68,8 @@ public class ConfigParsingTests : IDisposable
         Assert.Equal(222, w.RequestListHeight);
         Assert.True(w.Expanded);
         Assert.True(w.Topmost);
+        Assert.Equal(1200, w.GeneratedUsageBaseline);
+        Assert.Equal(3400, w.PrefilledUsageBaseline);
     }
 
     [Fact]

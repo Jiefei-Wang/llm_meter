@@ -29,6 +29,8 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged, IDisposable
     private readonly RequestSlotList _requestSlots = new();
     private readonly DispatcherTimer _requestStateTimer;
     private bool _showingPrefillHistory = true;
+    private long? _generatedUsageBaseline;
+    private long? _prefilledUsageBaseline;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -122,6 +124,23 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged, IDisposable
         HeaderText = "LLM Meter";
         SubtitleText = "select a backend";
         Render(null);
+    }
+
+    public void SetUsageBaselines(long? generated, long? prefilled)
+    {
+        _generatedUsageBaseline = generated;
+        _prefilledUsageBaseline = prefilled;
+        PollLatest(force: true);
+    }
+
+    public (long? Generated, long? Prefilled) ResetUsage()
+    {
+        _generatedUsageBaseline = _lastRendered?.GeneratedTokensTotal.HasValue == true
+            ? _lastRendered.GeneratedTokensTotal.Value : null;
+        _prefilledUsageBaseline = _lastRendered?.PrefilledTokensTotal.HasValue == true
+            ? _lastRendered.PrefilledTokensTotal.Value : null;
+        PollLatest(force: true);
+        return (_generatedUsageBaseline, _prefilledUsageBaseline);
     }
 
     public void ShowScanning()
@@ -322,8 +341,9 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged, IDisposable
     internal string MetricGeneratedTotal(MetricSnapshot s)
     {
         if (!s.GeneratedTokensTotal.HasValue) { GeneratedToolTip = "—"; return "—"; }
-        long v = s.GeneratedTokensTotal.Value;
-        GeneratedToolTip = $"{v:N0} tokens generated since monitoring began";
+        long total = s.GeneratedTokensTotal.Value;
+        long v = _generatedUsageBaseline is { } baseline && total >= baseline ? total - baseline : total;
+        GeneratedToolTip = $"{v:N0} tokens generated since usage reset";
         return Fmt.Tokens(v);
     }
 
@@ -331,8 +351,9 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged, IDisposable
     internal string MetricPrefilledTotal(MetricSnapshot s)
     {
         if (!s.PrefilledTokensTotal.HasValue) { PrefilledToolTip = "—"; return "—"; }
-        long v = s.PrefilledTokensTotal.Value;
-        PrefilledToolTip = $"{v:N0} prompt tokens prefilled since monitoring began";
+        long total = s.PrefilledTokensTotal.Value;
+        long v = _prefilledUsageBaseline is { } baseline && total >= baseline ? total - baseline : total;
+        PrefilledToolTip = $"{v:N0} prompt tokens prefilled since usage reset";
         return Fmt.Tokens(v);
     }
 

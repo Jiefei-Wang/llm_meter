@@ -74,6 +74,8 @@ Requirements for this line:
 
 The widget uses `SizeToContent` and a layout scale transform. Its root content grid has a fixed width; dynamic children such as long backend labels must truncate within it rather than participate in the window's desired width. Opening charts, expanding details, changing counters, or adding request rows must not change the widget width. Vertical request-list height may grow to the configured high-water mark and is user-resizable.
 
+Persist exactly the monitor windows the user created and restore those windows at startup. Backend discovery may bind an unbound window but must not automatically spawn a window for every discovered server. The widget options include `Reset Usage`, which persists per-window baselines and resets the displayed generated and prefilled totals without mutating server counters.
+
 Preserve per-monitor DPI behavior, frameless dragging, edge scaling, topmost behavior, and saved placement. Avoid blocking work on the WPF dispatcher.
 
 ## Discovery and privacy

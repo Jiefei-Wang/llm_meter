@@ -21,6 +21,8 @@ public sealed class WindowConfig
     public bool Expanded { get; set; }
     public bool Topmost { get; set; }
     public bool Visible { get; set; } = true;
+    public long? GeneratedUsageBaseline { get; set; }
+    public long? PrefilledUsageBaseline { get; set; }
 }
 
 public sealed class AppConfiguration

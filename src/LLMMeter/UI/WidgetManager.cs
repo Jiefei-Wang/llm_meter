@@ -69,9 +69,9 @@ public sealed class WidgetManager
     }
 
     /// <summary>
-    /// Binds still-unbound widgets to discovered backends nobody else shows yet,
-    /// then spawns additional widgets for discovered backends no window claims
-    /// (up to MaxWindows). Runs on the UI thread. Hidden windows keep their claims.
+    /// Binds still-unbound user-created widgets to discovered backends nobody else
+    /// shows yet. Discovery never creates extra windows; startup restores exactly
+    /// the windows recorded in configuration.
     /// </summary>
     internal void AutoBindPendingWindows()
     {
@@ -103,30 +103,7 @@ public sealed class WidgetManager
             changed = true;
         }
 
-        // 2. One widget per discovered backend: cover orphans with new windows.
-        foreach (var entry in entries)
-        {
-            if (used.Contains(entry.Target.GroupKey)) continue;
-            if (_windows.Count >= MaxWindows) break;
-            CreateWindowForEntry(entry);
-            used.Add(entry.Target.GroupKey);
-            changed = true;
-        }
-
         if (changed) QueueSave();
-    }
-
-    private void CreateWindowForEntry(BackendRegistry.TargetEntry entry)
-    {
-        var w = CreateManagedWindow(Services.Config.TopmostByDefault);
-
-        double x = 120 + (_windows.Count - 1) * 28;
-        double y = 140 + (_windows.Count - 1) * 24;
-        var spot = ScreenGuard.EnsureVisible(x, y, 320, 130);
-        w.Left = spot.X; w.Top = spot.Y;
-        w.WindowStartupLocation = WindowStartupLocation.Manual;
-        w.Show();
-        w.Bind(entry);
     }
 
     private MonitorWindow CreateManagedWindow(bool alwaysOnTop)
@@ -248,6 +225,8 @@ public sealed class WidgetManager
             Expanded = w.Persisted.Expanded,
             Topmost = w.Persisted.Topmost,
             Visible = w.IsVisible,
+            GeneratedUsageBaseline = w.Persisted.GeneratedUsageBaseline,
+            PrefilledUsageBaseline = w.Persisted.PrefilledUsageBaseline,
         })];
         return cfg;
     }
