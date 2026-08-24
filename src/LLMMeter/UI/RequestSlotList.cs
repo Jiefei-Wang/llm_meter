@@ -74,6 +74,7 @@ internal sealed class RequestSlotList
 public sealed class RequestRow : INotifyPropertyChanged
 {
     private string _primaryText = "";
+    private string _speedText = "";
     private string _metricsText = "";
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -98,8 +99,14 @@ public sealed class RequestRow : INotifyPropertyChanged
         private set { if (_metricsText == value) return; _metricsText = value; Changed(nameof(MetricsText)); Changed(nameof(Line)); }
     }
 
+    public string SpeedText
+    {
+        get => _speedText;
+        private set { if (_speedText == value) return; _speedText = value; Changed(nameof(SpeedText)); Changed(nameof(Line)); }
+    }
+
     // Retained for diagnostics/tests and accessibility tooling.
-    public string Line => string.Join("  ", new[] { PrimaryText, MetricsText }.Where(text => text.Length > 0));
+    public string Line => string.Join("  ", new[] { PrimaryText, SpeedText, MetricsText }.Where(text => text.Length > 0));
 
     internal static RequestRow Empty(DateTimeOffset since) => new() { EmptySince = since };
     internal static RequestRow Message(string text) => new() { IsInformational = true, PrimaryText = text };
@@ -111,6 +118,7 @@ public sealed class RequestRow : INotifyPropertyChanged
         IsCompleted = false;
         IsInformational = false;
         PrimaryText = request.Id;
+        SpeedText = request.TokensPerSecond.HasValue ? CompactRate(request.TokensPerSecond.Value) : "—";
         MetricsText = FormatMetrics(request);
     }
 
@@ -120,6 +128,7 @@ public sealed class RequestRow : INotifyPropertyChanged
         IsCompleted = true;
         CompletedUntil = until;
         PrimaryText = $"{RequestId}  ·  completed";
+        SpeedText = "";
     }
 
     internal void MakeEmpty(DateTimeOffset since)
@@ -130,6 +139,7 @@ public sealed class RequestRow : INotifyPropertyChanged
         IsInformational = false;
         EmptySince = since;
         PrimaryText = "";
+        SpeedText = "";
         MetricsText = "";
     }
 
@@ -139,21 +149,18 @@ public sealed class RequestRow : INotifyPropertyChanged
         string cached = Slot(request.CachedTokens.HasValue ? Fmt.Tokens(request.CachedTokens.Value) : "—");
         string evaluated = Slot(request.PrefilledTokens.HasValue ? Fmt.Tokens(request.PrefilledTokens.Value) : "—");
         string output = Slot(request.OutputTokens.HasValue ? Fmt.Tokens(request.OutputTokens.Value) : "—");
-        string rate = request.TokensPerSecond.HasValue
-            ? Slot(CompactRate(request.TokensPerSecond.Value))
-            : Slot("—");
-        return $"IN: {input} · CACHED: {cached} · EVAL: {evaluated} · OUT: {output} · {rate}";
+        return $"IN: {input} · CACHED: {cached} · EVAL: {evaluated} · OUT: {output}";
 
         static string Slot(string value) => value.PadRight(6);
-
-        static string CompactRate(double value) => value switch
-        {
-            >= 1_000_000 => $"{value / 1_000_000:0.#}M/s",
-            >= 10_000 => $"{value / 1000:0}k/s",
-            >= 1_000 => $"{value / 1000:0.#}k/s",
-            _ => Fmt.Rate(value),
-        };
     }
+
+    private static string CompactRate(double value) => value switch
+    {
+        >= 1_000_000 => $"{value / 1_000_000:0.#}M/s",
+        >= 10_000 => $"{value / 1000:0}k/s",
+        >= 1_000 => $"{value / 1000:0.#}k/s",
+        _ => Fmt.Rate(value),
+    };
 
     private void Changed(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
 }

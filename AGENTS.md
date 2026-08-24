@@ -48,18 +48,19 @@ Important `/slots` semantics:
 - For the per-request `IN` value, prefer `CACHED + EVAL` when both native fields exist. Fall back to `n_prompt_tokens` for older schemas.
 - `n_decoded` is the per-request output token count. It may reset when a slot receives a new task; re-baseline rather than generating a negative rate.
 
-The active-request statistics line is intentionally compact and stable:
+The active-request card is intentionally compact and stable:
 
 ```text
-IN: 12.32k · CACHED: 512    · EVAL: 11.81k · OUT: 203    · 61.4/s
+#15720                                      61.4/s
+IN: 12.32k · CACHED: 512    · EVAL: 11.81k · OUT: 203
 ```
 
 Requirements for this line:
 
 - Labels are `IN:`, `CACHED:`, `EVAL:`, and `OUT:`.
-- Each value, including speed, reserves six monospace characters and is right-padded when shorter so values remain left-aligned.
+- Each token value reserves six monospace characters and is right-padded when shorter so values remain left-aligned.
 - Put spaces around each `·` separator so it does not touch a value or the following label.
-- Render all request statistics on one line and make the fixed widget width wide enough to show the complete text without ellipsis.
+- Show generation speed right-aligned on the task-ID line. Render all four token statistics on the second line without ellipsis.
 - Do not show the approximate `~` prefix on per-request speed.
 - Keep a constant font size. Do not use a `Viewbox` or dynamic font scaling.
 - Constrain request cards to the metrics-grid/widget width. Long text may use trimming only as a final safety measure; it must never widen the window.

@@ -41,10 +41,11 @@ LLM Meter places its configuration beside the executable in `LLMMeter.json`. Cor
 - Click a throughput card to switch between its current value and five-minute chart.
 - Use the header or tray menu to add endpoints, switch themes, toggle topmost, or open another widget.
 
-The active llama-server request line uses compact, fixed-width fields:
+The active llama-server request card puts generation speed beside the task ID and uses compact, fixed-width token fields:
 
 ```text
-IN: 12.32k · CACHED: 512    · EVAL: 11.81k · OUT: 203    · 61.4/s
+#15720                                      61.4/s
+IN: 12.32k · CACHED: 512    · EVAL: 11.81k · OUT: 203
 ```
 
 `IN` is the total prompt represented by cached plus newly evaluated tokens. `CACHED` is reused KV-cache content, `EVAL` is prompt work performed for the request, and `OUT` is generated output.

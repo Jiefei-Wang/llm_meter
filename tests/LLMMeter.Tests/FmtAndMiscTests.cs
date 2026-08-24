@@ -197,8 +197,9 @@ public class RequestSlotListTests
         Assert.Contains("CACHED: 15    ", slots.Rows[0].MetricsText);
         Assert.Contains("EVAL: 1.07k ", slots.Rows[0].MetricsText);
         Assert.Contains("OUT: 10    ", slots.Rows[0].MetricsText);
-        Assert.EndsWith("1.4k/s", slots.Rows[0].MetricsText);
-        Assert.DoesNotContain("~", slots.Rows[0].MetricsText);
+        Assert.Equal("1.4k/s", slots.Rows[0].SpeedText);
+        Assert.DoesNotContain("/s", slots.Rows[0].MetricsText);
+        Assert.DoesNotContain("~", slots.Rows[0].SpeedText);
         Assert.DoesNotContain(Environment.NewLine, slots.Rows[0].MetricsText);
     }
 
