@@ -193,10 +193,11 @@ public class RequestSlotListTests
         var slots = new RequestSlotList();
         slots.Update([Request("#1", 1086, 1071, 10, 15, 1420)], DateTimeOffset.UtcNow);
 
-        Assert.Contains("IN: 1.09k ", slots.Rows[0].MetricsText);
-        Assert.Contains("CACHED: 15    ", slots.Rows[0].MetricsText);
-        Assert.Contains("EVAL: 1.07k ", slots.Rows[0].MetricsText);
-        Assert.Contains("OUT: 10    ", slots.Rows[0].MetricsText);
+        Assert.Contains("IN 1.09k ", slots.Rows[0].MetricsText);
+        Assert.Contains("CACHED 15    ", slots.Rows[0].MetricsText);
+        Assert.Contains("EVAL 1.07k ", slots.Rows[0].MetricsText);
+        Assert.Contains("OUT 10    ", slots.Rows[0].MetricsText);
+        Assert.DoesNotContain(":", slots.Rows[0].MetricsText);
         Assert.Equal("1.4k/s", slots.Rows[0].SpeedText);
         Assert.DoesNotContain("/s", slots.Rows[0].MetricsText);
         Assert.DoesNotContain("~", slots.Rows[0].SpeedText);
@@ -211,9 +212,9 @@ public class RequestSlotListTests
         slots.Update([Request("#1", 1086, 100, 2)], now);
         slots.Update([Request("#1", 9999, 700, 20)], now.AddSeconds(1));
 
-        Assert.Contains("IN: 10k   ", slots.Rows[0].MetricsText);
-        Assert.Contains("EVAL: 700   ", slots.Rows[0].MetricsText);
-        Assert.Contains("OUT: 20    ", slots.Rows[0].MetricsText);
+        Assert.Contains("IN 10k   ", slots.Rows[0].MetricsText);
+        Assert.Contains("EVAL 700   ", slots.Rows[0].MetricsText);
+        Assert.Contains("OUT 20    ", slots.Rows[0].MetricsText);
     }
 
     [Fact]

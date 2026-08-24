@@ -44,8 +44,8 @@ LLM Meter places its configuration beside the executable in `LLMMeter.json`. Cor
 The active llama-server request card puts generation speed beside the task ID and uses compact, fixed-width token fields:
 
 ```text
-#15720                                      61.4/s
-IN: 12.32k · CACHED: 512    · EVAL: 11.81k · OUT: 203
+#15720  61.4/s
+IN 12.32k · CACHED 512    · EVAL 11.81k · OUT 203
 ```
 
 `IN` is the total prompt represented by cached plus newly evaluated tokens. `CACHED` is reused KV-cache content, `EVAL` is prompt work performed for the request, and `OUT` is generated output.

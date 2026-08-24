@@ -149,7 +149,7 @@ public sealed class RequestRow : INotifyPropertyChanged
         string cached = Slot(request.CachedTokens.HasValue ? Fmt.Tokens(request.CachedTokens.Value) : "—");
         string evaluated = Slot(request.PrefilledTokens.HasValue ? Fmt.Tokens(request.PrefilledTokens.Value) : "—");
         string output = Slot(request.OutputTokens.HasValue ? Fmt.Tokens(request.OutputTokens.Value) : "—");
-        return $"IN: {input} · CACHED: {cached} · EVAL: {evaluated} · OUT: {output}";
+        return $"IN {input} · CACHED {cached} · EVAL {evaluated} · OUT {output}";
 
         static string Slot(string value) => value.PadRight(6);
     }
