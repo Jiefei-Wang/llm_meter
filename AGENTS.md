@@ -71,7 +71,7 @@ Requirements for this line:
 
 ## Window behavior
 
-The widget uses `SizeToContent` and a layout scale transform. New content can accidentally alter desired width, so constrain dynamic sections explicitly. Opening charts, expanding details, changing counters, or adding request rows must not change the widget width. Vertical request-list height may grow to the configured high-water mark and is user-resizable.
+The widget uses `SizeToContent` and a layout scale transform. Its root content grid has a fixed width; dynamic children such as long backend labels must truncate within it rather than participate in the window's desired width. Opening charts, expanding details, changing counters, or adding request rows must not change the widget width. Vertical request-list height may grow to the configured high-water mark and is user-resizable.
 
 Preserve per-monitor DPI behavior, frameless dragging, edge scaling, topmost behavior, and saved placement. Avoid blocking work on the WPF dispatcher.
 
