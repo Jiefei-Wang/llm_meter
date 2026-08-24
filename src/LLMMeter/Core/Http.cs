@@ -37,27 +37,21 @@ public sealed class HttpService : IHttp, IDisposable
     private readonly HttpClient _client;
 
     public static HttpService Create(Uri baseUrl, TimeSpan timeout)
-    {
-        var client = SharedClientFactory.Create();
-        client.Timeout = timeout;
-        return new HttpService(baseUrl, client, owns: false);
-    }
+        => CreateOwning(baseUrl, timeout);
 
     public static HttpService CreateOwning(Uri baseUrl, TimeSpan timeout)
     {
         var client = SharedClientFactory.Create();
         client.Timeout = timeout;
-        return new HttpService(baseUrl, client, owns: true);
+        return new HttpService(baseUrl, client);
     }
 
-    private HttpService(Uri baseUrl, HttpClient client, bool owns)
+    private HttpService(Uri baseUrl, HttpClient client)
     {
         BaseUrl = NormalizeBase(baseUrl);
         _client = client;
-        _owns = owns;
     }
 
-    private readonly bool _owns;
     public Uri BaseUrl { get; }
     public TimeSpan Timeout => _client.Timeout;
 
@@ -85,7 +79,7 @@ public sealed class HttpService : IHttp, IDisposable
 
     public void Dispose()
     {
-        if (_owns) _client.Dispose();
+        _client.Dispose();
     }
 
     public static Uri NormalizeBase(Uri u)

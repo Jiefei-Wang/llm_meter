@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Media;
+using System.Windows.Threading;
 using LLMMeter.Adapters;
 using LLMMeter.Collection;
 using LLMMeter.Core;
@@ -12,11 +13,20 @@ namespace LLMMeter.UI;
 /// Binds a shared BackendCollector to one widget. All values respect the
 /// metric quality model: exact, ~approximate, or "—" unavailable.
 /// </summary>
-public sealed class MonitorWindowViewModel : INotifyPropertyChanged
+public sealed class MonitorWindowViewModel : INotifyPropertyChanged, IDisposable
 {
     private BackendCollector? _collector;
+    private BackendRegistry.TargetEntry? _entry;
     private MetricSnapshot? _lastRendered;
     private bool _forceNext;
+    private bool _renderingActive;
+    private int _renderQueued;
+    private readonly Dispatcher _dispatcher = Dispatcher.CurrentDispatcher;
+    private readonly Dictionary<string, object?> _published = new();
+    private readonly RateHistory _history = new();
+    private readonly RequestSlotList _requestSlots = new();
+    private readonly DispatcherTimer _requestStateTimer;
+    private bool _showingPrefillHistory = true;
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -24,9 +34,16 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
     public TelemetryHelp? CurrentHelp { get; private set; }
     public bool IncludeDetails { get; set; }
 
-    public ObservableCollection<RequestRow> RequestRows { get; } = [];
+    public ObservableCollection<RequestRow> RequestRows => _requestSlots.Rows;
+    public IReadOnlyList<ActivityPoint> PrefillHistory { get; private set; } = Array.Empty<ActivityPoint>();
+    public IReadOnlyList<ActivityPoint> GenerateHistory { get; private set; } = Array.Empty<ActivityPoint>();
+    public IReadOnlyList<ActivityPoint> SelectedActivityHistory { get; private set; } = Array.Empty<ActivityPoint>();
+    public string ActivityTitle { get; private set; } = "Prefill · last 5 minutes";
+    public string ActivityCurrentText { get; private set; } = "—";
 
     // header
+    public string HeaderText { get; private set; } = "LLM Meter";
+    public string SubtitleText { get; private set; } = "select a backend";
     public string StatusToolTip { get; private set; } = "Connecting";
     public Brush StatusBrush { get; private set; } = Brushes.Gray;
     public string RunningText { get; private set; } = "—";
@@ -50,27 +67,80 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
     /// <summary>Tooltip text for the generated-total metric.</summary>
     public string GeneratedToolTip { get; private set; } = "";
 
+    public MonitorWindowViewModel()
+    {
+        _requestStateTimer = new DispatcherTimer(DispatcherPriority.Background, _dispatcher)
+        {
+            Interval = TimeSpan.FromMilliseconds(250),
+        };
+        _requestStateTimer.Tick += (_, _) =>
+        {
+            _requestSlots.Advance(DateTimeOffset.Now);
+            if (!_requestSlots.HasTimedState) _requestStateTimer.Stop();
+        };
+    }
+
     /// <summary>Attach to a collector (shared — no duplicate polling).</summary>
     public void Bind(BackendCollector collector, BackendRegistry.TargetEntry entry)
     {
         if (ReferenceEquals(_collector, collector))
         {
+            _entry = entry;
+            UpdateHeader(entry.ModelName);
             PollLatest(force: true);
             return;
         }
+        if (_collector != null) _collector.SnapshotUpdated -= OnSnapshotUpdated;
         _collector = collector;
+        _entry = entry;
+        _history.Clear();
+        _requestSlots.Clear();
         _lastRendered = null;
         _forceNext = true;
         CurrentHelp = collector.GetHelp();
+        UpdateHeader(entry.ModelName);
+        collector.SnapshotUpdated += OnSnapshotUpdated;
+        if (collector.Latest is { } latest) _history.Record(latest);
         Log.Info($"VM bound to {collector.Endpoint.Id}");
         PollLatest(force: true);
     }
 
     public void Unbind()
     {
+        if (_collector != null) _collector.SnapshotUpdated -= OnSnapshotUpdated;
         _collector = null;
+        _entry = null;
         _lastRendered = null;
         CurrentHelp = null;
+        _history.Clear();
+        HeaderText = "LLM Meter";
+        SubtitleText = "select a backend";
+        Render(null);
+    }
+
+    public void ShowScanning()
+    {
+        HeaderText = "LLM Meter";
+        SubtitleText = "scanning for servers…";
+        P(nameof(HeaderText));
+        P(nameof(SubtitleText));
+    }
+
+    public void SetRenderingActive(bool active)
+    {
+        _renderingActive = active;
+        if (active) PollLatest(force: true);
+    }
+
+    private void OnSnapshotUpdated(MetricSnapshot snapshot)
+    {
+        _history.Record(snapshot);
+        if (!_renderingActive || Interlocked.Exchange(ref _renderQueued, 1) != 0) return;
+        _dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+        {
+            Interlocked.Exchange(ref _renderQueued, 0);
+            if (_renderingActive) PollLatest(force: true);
+        });
     }
 
     public void PollLatest(bool force = false) => Poll(force || _forceNext);
@@ -91,10 +161,14 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
         if (s is null)
         {
             SetState(ConnectionState.Connecting, null);
+            ResetMetrics();
+            RaiseAll();
             return;
         }
 
         SetState(s.State, s);
+        CurrentHelp = _collector?.GetHelp();
+        UpdateHeader(s.ModelName);
 
         RunningText = MetricRunningQueue(s);
         PrefillText = MetricRate(s.PrefillTokPerSec, "prefill");
@@ -104,9 +178,12 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
         TtftText = s.RecentTtftMs.HasValue ? Fmt.Metric(s.RecentTtftMs, Fmt.Milliseconds) : "—";
         KvText = s.KvCacheUsage.HasValue ? Fmt.Metric(s.KvCacheUsage, Fmt.Percent) : "—";
         PrefilledText = MetricPrefilledTotal(s);
+        PrefillHistory = _history.PrefillSnapshot(DateTimeOffset.Now);
+        GenerateHistory = _history.GenerateSnapshot(DateTimeOffset.Now);
+        UpdateSelectedActivity();
 
-        // Requests area (expanded)
-        RequestRows.Clear();
+        // Requests area (expanded). Request slots are stable by ID: completed
+        // work lingers, holes remain in place, and new work reuses holes first.
         MoreText = "";
         MoreTextVisibility = Visibility.Collapsed;
 
@@ -115,30 +192,24 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
 
         if (enumerationSupported)
         {
-            var reqs = s.Requests!;
-            foreach (var r in reqs.Take(4))
-                RequestRows.Add(RequestRow.From(r));
-            if (reqs.Count > 4)
-            {
-                MoreText = $"+ {reqs.Count - 4} more";
-                MoreTextVisibility = Visibility.Visible;
-            }
-            if (reqs.Count == 0)
-            {
-                RequestRows.Add(new RequestRow { Line = "no active request details" });
-            }
+            _requestSlots.Update(s.Requests!, DateTimeOffset.Now);
+            if (_requestSlots.HasTimedState && !_requestStateTimer.IsEnabled)
+                _requestStateTimer.Start();
         }
         else
         {
             // Enumeration unsupported: show honest aggregate note when running > 0.
             if (s.Running.HasValue && s.Running.Value > 0 && IncludeDetails)
             {
-                RequestRows.Add(new RequestRow { Line = $"{Fmt.Count(s.Running.Value)} active request(s)" });
-                RequestRows.Add(new RequestRow { Line = "per-request details unavailable" });
+                _requestSlots.ShowMessages([
+                    $"{Fmt.Count(s.Running.Value)} active request(s)",
+                    "per-request details unavailable",
+                ]);
             }
             else
             {
                 RequestsAreaVisibility = Visibility.Collapsed;
+                _requestSlots.Clear();
             }
         }
 
@@ -151,6 +222,44 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
             s.State == ConnectionState.Limited ? Visibility.Visible : Visibility.Collapsed;
 
         RaiseAll();
+    }
+
+    public void SelectActivityHistory(bool prefill)
+    {
+        _showingPrefillHistory = prefill;
+        UpdateSelectedActivity();
+        P(nameof(SelectedActivityHistory));
+        P(nameof(ActivityTitle));
+        P(nameof(ActivityCurrentText));
+    }
+
+    private void UpdateSelectedActivity()
+    {
+        SelectedActivityHistory = _showingPrefillHistory ? PrefillHistory : GenerateHistory;
+        ActivityTitle = (_showingPrefillHistory ? "Prefill" : "Generate") + " · last 5 minutes";
+        ActivityCurrentText = _showingPrefillHistory ? PrefillText : GenerateText;
+    }
+
+    private void UpdateHeader(string? modelName)
+    {
+        if (_entry is not { } entry) return;
+        string name = modelName is { Length: > 0 }
+            ? $"{entry.Target.Kind.DisplayName()} · {modelName}"
+            : entry.Target.DisplayName;
+        HeaderText = name.Length > 42 ? name[..41].TrimEnd() + "…" : name;
+        SubtitleText = MonitorWindow.DescribeOrigin(entry);
+    }
+
+    private void ResetMetrics()
+    {
+        RunningText = GeneratedText = PrefillText = GenerateText = TtftText = KvText = PrefilledText = "—";
+        RunningToolTip = GeneratedToolTip = PrefilledToolTip = "";
+        MoreText = ModelsInfoText = "";
+        PrefillHistory = GenerateHistory = SelectedActivityHistory = Array.Empty<ActivityPoint>();
+        ActivityCurrentText = "—";
+        _requestSlots.Clear();
+        _requestStateTimer.Stop();
+        InfoButtonVisibility = RequestsAreaVisibility = ModelsTextVisibility = MoreTextVisibility = Visibility.Collapsed;
     }
 
     internal static string BuildModelsLine(MetricSnapshot s)
@@ -223,40 +332,36 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged
 
     private void RaiseAll()
     {
-        P(nameof(StatusBrush)); P(nameof(StatusToolTip));
-        P(nameof(RunningText)); P(nameof(GeneratedText));
-        P(nameof(RunningToolTip)); P(nameof(GeneratedToolTip));
-        P(nameof(PrefillText)); P(nameof(GenerateText));
-        P(nameof(TtftText)); P(nameof(KvText));
-        P(nameof(PrefilledText)); P(nameof(PrefilledToolTip));
-        P(nameof(MoreText)); P(nameof(ModelsInfoText));
-        P(nameof(InfoButtonVisibility)); P(nameof(RequestsAreaVisibility));
-        P(nameof(ModelsTextVisibility)); P(nameof(MoreTextVisibility));
-        P(nameof(StateToolTip));
+        Changed(nameof(HeaderText), HeaderText); Changed(nameof(SubtitleText), SubtitleText);
+        Changed(nameof(StatusBrush), StatusBrush); Changed(nameof(StatusToolTip), StatusToolTip);
+        Changed(nameof(RunningText), RunningText); Changed(nameof(GeneratedText), GeneratedText);
+        Changed(nameof(RunningToolTip), RunningToolTip); Changed(nameof(GeneratedToolTip), GeneratedToolTip);
+        Changed(nameof(PrefillText), PrefillText); Changed(nameof(GenerateText), GenerateText);
+        Changed(nameof(TtftText), TtftText); Changed(nameof(KvText), KvText);
+        Changed(nameof(PrefilledText), PrefilledText); Changed(nameof(PrefilledToolTip), PrefilledToolTip);
+        Changed(nameof(MoreText), MoreText); Changed(nameof(ModelsInfoText), ModelsInfoText);
+        Changed(nameof(InfoButtonVisibility), InfoButtonVisibility); Changed(nameof(RequestsAreaVisibility), RequestsAreaVisibility);
+        Changed(nameof(ModelsTextVisibility), ModelsTextVisibility); Changed(nameof(MoreTextVisibility), MoreTextVisibility);
+        Changed(nameof(StateToolTip), StateToolTip);
+        Changed(nameof(PrefillHistory), PrefillHistory); Changed(nameof(GenerateHistory), GenerateHistory);
+        Changed(nameof(SelectedActivityHistory), SelectedActivityHistory);
+        Changed(nameof(ActivityTitle), ActivityTitle); Changed(nameof(ActivityCurrentText), ActivityCurrentText);
+    }
 
-        // ObservableCollection handles rows; nudge for safety on full rebind
-        P(nameof(RequestRows));
+    private void Changed(string name, object? value)
+    {
+        if (_published.TryGetValue(name, out var previous) && Equals(previous, value)) return;
+        _published[name] = value;
+        P(name);
     }
 
     private void P(string name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
-}
 
-public sealed class RequestRow
-{
-    public required string Line { get; init; }
-
-    public static RequestRow From(RequestSnapshot r)
+    public void Dispose()
     {
-        string inTok = r.InputTokens.HasValue ? Fmt.Tokens(r.InputTokens.Value) : "—";
-        string outTok = r.OutputTokens.HasValue ? Fmt.Tokens(r.OutputTokens.Value) : "—";
-        string rate = r.TokensPerSecond.HasValue
-            ? (r.TokensPerSecond.Quality == MetricQuality.Exact ? "" : "~") + Fmt.Rate(r.TokensPerSecond.Value)
-            : "";
-
-        string idPart = r.Id.PadLeft(6);
-        string inPart = ("IN " + inTok).PadRight(10);
-        string outPart = ("OUT " + outTok).PadRight(9);
-        string ratePart = rate.Length > 0 ? rate : "";
-        return new RequestRow { Line = $"{idPart}  {inPart}{outPart}{ratePart}" };
+        if (_collector != null) _collector.SnapshotUpdated -= OnSnapshotUpdated;
+        _collector = null;
+        _renderingActive = false;
+        _requestStateTimer.Stop();
     }
 }

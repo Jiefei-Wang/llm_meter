@@ -1,140 +1,158 @@
 <Window x:Class="LLMMeter.UI.MonitorWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:LLMMeter.UI"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         ResizeMode="NoResize" ShowInTaskbar="False" ShowActivated="False"
         SizeToContent="WidthAndHeight" Topmost="False"
         UseLayoutRounding="True" SnapsToDevicePixels="True"
         TextOptions.TextFormattingMode="Display"
-        MinWidth="220" MaxWidth="520"
-        ContextMenuOpening="OnContextMenuOpening"
-        Title="LLM Meter">
-    <Window.LayoutTransform>
-        <ScaleTransform x:Name="RootScale"/>
-    </Window.LayoutTransform>
+        MinWidth="186" MaxWidth="1080"
+        ContextMenuOpening="OnContextMenuOpening" Title="LLM Meter">
 
-    <Border x:Name="RootBorder" CornerRadius="8" Margin="10"
-            Background="{DynamicResource BgBrush}"
-            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"
-            MouseLeftButtonDown="OnDragMove">
-        <Border.Effect>
-            <DropShadowEffect BlurRadius="9" ShadowDepth="1.5" Opacity="0.35"/>
-        </Border.Effect>
+    <Window.Resources>
+        <Style x:Key="HeaderIconButton" TargetType="Button" BasedOn="{StaticResource GlyphButton}">
+            <Setter Property="Width" Value="28"/><Setter Property="Height" Value="28"/><Setter Property="Padding" Value="7"/>
+        </Style>
+        <Style x:Key="HeaderToggleButton" TargetType="ToggleButton">
+            <Setter Property="Width" Value="28"/><Setter Property="Height" Value="28"/><Setter Property="Padding" Value="7"/>
+            <Setter Property="Foreground" Value="{DynamicResource DimBrush}"/><Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/><Setter Property="Cursor" Value="Hand"/><Setter Property="Focusable" Value="False"/>
+            <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ToggleButton">
+                <Border x:Name="Chrome" Background="{TemplateBinding Background}" CornerRadius="6" Padding="{TemplateBinding Padding}">
+                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Border>
+                <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Chrome" Property="Background" Value="{DynamicResource HoverBrush}"/><Setter Property="Foreground" Value="{DynamicResource FgBrush}"/></Trigger>
+                    <Trigger Property="IsChecked" Value="True"><Setter TargetName="Chrome" Property="Background" Value="{DynamicResource AccentSoftBrush}"/><Setter Property="Foreground" Value="{DynamicResource AccentBrush}"/></Trigger>
+                </ControlTemplate.Triggers>
+            </ControlTemplate></Setter.Value></Setter>
+        </Style>
+        <Style x:Key="MetricCard" TargetType="Border">
+            <Setter Property="Background" Value="{DynamicResource PanelBrush}"/><Setter Property="BorderBrush" Value="{DynamicResource SoftBorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="7"/><Setter Property="Padding" Value="9,7"/>
+        </Style>
+    </Window.Resources>
 
-        <Grid Margin="10,7,10,8">
-            <Grid.RowDefinitions>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-                <RowDefinition Height="Auto"/>
-            </Grid.RowDefinitions>
+    <Border x:Name="RootBorder" CornerRadius="11" Margin="12" Background="{DynamicResource BgBrush}"
+            BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" MouseLeftButtonDown="OnDragMove">
+        <Border.LayoutTransform><ScaleTransform x:Name="RootScale"/></Border.LayoutTransform>
+        <Border.Effect><DropShadowEffect BlurRadius="18" ShadowDepth="2" Opacity="0.30"/></Border.Effect>
+        <Grid Margin="12,10,12,11">
+            <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
 
-            <!-- Header -->
             <Grid Grid.Row="0">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-
-                <Ellipse Grid.Column="0" x:Name="StatusDot" Width="9" Height="9"
-                         Fill="{DynamicResource OfflineBrush}" VerticalAlignment="Center"
-                         Margin="0,0,6,1"/>
-
-                <Button x:Name="SelectorButton" Grid.Column="1" Style="{StaticResource GlyphButton}"
-                        HorizontalAlignment="Left" Click="OnOpenSelector" ToolTip="Choose backend">
-                    <StackPanel Orientation="Horizontal">
-                        <TextBlock x:Name="HeaderText" FontSize="12.5" FontWeight="SemiBold"
-                                   Foreground="{DynamicResource FgBrush}"
-                                   Text="LLM Meter"/>
-                        <TextBlock Text=" ▾" FontFamily="Segoe UI" FontSize="10.5"
-                                   Foreground="{DynamicResource DimBrush}" Margin="2,1,0,0"/>
+                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <Ellipse x:Name="StatusDot" Width="9" Height="9" Margin="0,0,8,0" VerticalAlignment="Center"
+                         Fill="{Binding StatusBrush}" ToolTip="{Binding StatusToolTip}"/>
+                <Button x:Name="SelectorButton" Grid.Column="1" Style="{StaticResource GlyphButton}" HorizontalContentAlignment="Left"
+                        Padding="0,2" Click="OnOpenSelector" ToolTip="Choose backend">
+                    <StackPanel>
+                        <DockPanel LastChildFill="True">
+                            <Path DockPanel.Dock="Right" Width="8" Height="5" Margin="7,1,2,0" Stretch="Fill"
+                                  Fill="{DynamicResource DimBrush}" Data="M 0 0 L 8 0 L 4 5 Z"/>
+                            <TextBlock x:Name="HeaderText" FontSize="13" FontWeight="SemiBold" Text="{Binding HeaderText}" TextTrimming="CharacterEllipsis"/>
+                        </DockPanel>
+                        <TextBlock x:Name="SubtitleText" Style="{StaticResource DimText}" Text="{Binding SubtitleText}" TextTrimming="CharacterEllipsis"/>
                     </StackPanel>
                 </Button>
-
-                <StackPanel Grid.Column="3" Orientation="Horizontal">
-                    <Button x:Name="InfoButton" Style="{StaticResource GlyphButton}" Content="ⓘ"
-                            FontFamily="Segoe UI" Visibility="Collapsed"
-                            Click="OnShowHelp" ToolTip="Why is telemetry limited?"/>
-                    <Button x:Name="AddWindowButton" Style="{StaticResource GlyphButton}" Content="＋"
-                            Click="OnNewWindow" ToolTip="New monitor window (Ctrl+N)"/>
-                    <Button x:Name="ExpandButton" Style="{StaticResource GlyphButton}" Content="︾"
-                            Click="OnToggleExpand" ToolTip="Expand details"/>
-                    <Button x:Name="CloseButton" Style="{StaticResource GlyphButton}" Content="✕"
-                            Click="OnCloseWidget" ToolTip="Close this widget"/>
+                <StackPanel Grid.Column="2" Orientation="Horizontal" Margin="6,0,0,0">
+                    <Button x:Name="InfoButton" Style="{StaticResource HeaderIconButton}" Visibility="{Binding InfoButtonVisibility}"
+                            Click="OnShowHelp" ToolTip="Why is telemetry limited?">
+                        <Viewbox><Path Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Data="M 8,1 A 7,7 0 1 0 8,15 A 7,7 0 1 0 8,1 M 7.2,6 H 8.8 V 12 H 7.2 Z M 7.2,3.5 H 8.8 V 5 H 7.2 Z"/></Viewbox>
+                    </Button>
+                    <ToggleButton x:Name="PinButton" Style="{StaticResource HeaderToggleButton}" Click="OnToggleTopmost" ToolTip="Always on top">
+                        <Viewbox><Path Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ToggleButton}}" Data="M 5,1 H 11 L 10,5 L 13,8 V 9 H 8.8 V 15 L 7.2,13.4 V 9 H 3 V 8 L 6,5 Z"/></Viewbox>
+                    </ToggleButton>
+                    <Button x:Name="ExpandButton" Style="{StaticResource HeaderIconButton}" Click="OnToggleExpand" ToolTip="Expand details">
+                        <Viewbox><Path Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Data="M 3,5 L 8,10 L 13,5 L 12,4 L 8,8 L 4,4 Z"/></Viewbox>
+                    </Button>
+                    <Button x:Name="MenuButton" Style="{StaticResource HeaderIconButton}" Click="OnOpenMenu" ToolTip="More actions">
+                        <Viewbox><Path Fill="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" Data="M 3,7 A 1.3,1.3 0 1 0 3,9.6 A 1.3,1.3 0 1 0 3,7 M 8,7 A 1.3,1.3 0 1 0 8,9.6 A 1.3,1.3 0 1 0 8,7 M 13,7 A 1.3,1.3 0 1 0 13,9.6 A 1.3,1.3 0 1 0 13,7"/></Viewbox>
+                    </Button>
+                    <Button x:Name="CloseButton" Style="{StaticResource HeaderIconButton}" Click="OnCloseWidget" ToolTip="Close this widget">
+                        <Viewbox><Path Stroke="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" StrokeThickness="1.7" Data="M 3,3 L 13,13 M 13,3 L 3,13"/></Viewbox>
+                    </Button>
                 </StackPanel>
             </Grid>
 
-            <!-- Subtitle -->
-            <TextBlock Grid.Row="1" x:Name="SubtitleText" Style="{StaticResource DimText}"
-                       Margin="15,1,0,4" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
-                       Text="select a backend"/>
-
-            <!-- Metrics -->
-            <Grid Grid.Row="2" x:Name="MetricsGrid" Margin="2,3,2,1">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="14"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/>
-                </Grid.RowDefinitions>
-
-                <TextBlock Grid.Row="0" Grid.Column="0" Style="{StaticResource MetricLabel}" Text="Running"/>
-                <TextBlock Grid.Row="0" Grid.Column="1" x:Name="RunningValue" Style="{StaticResource MetricValue}" Text="{Binding RunningText}" ToolTip="{Binding RunningToolTip}" MinWidth="34"/>
-                <TextBlock Grid.Row="0" Grid.Column="3" Style="{StaticResource MetricLabel}" Text="Generated"/>
-                <TextBlock Grid.Row="0" Grid.Column="4" x:Name="QueueValue" Style="{StaticResource MetricValue}" Text="{Binding GeneratedText}" ToolTip="{Binding GeneratedToolTip}" MinWidth="34"/>
-
-                <TextBlock Grid.Row="1" Grid.Column="0" Style="{StaticResource MetricLabel}" Text="Prefill"/>
-                <TextBlock Grid.Row="1" Grid.Column="1" x:Name="PrefillValue" Style="{StaticResource MetricValue}" Text="{Binding PrefillText}" MinWidth="52"/>
-                <TextBlock Grid.Row="1" Grid.Column="3" Style="{StaticResource MetricLabel}" Text="Generate"/>
-                <TextBlock Grid.Row="1" Grid.Column="4" x:Name="GenerateValue" Style="{StaticResource MetricValue}" Text="{Binding GenerateText}" MinWidth="52"/>
+            <!-- Both views share one fixed footprint so SizeToContent never
+                 resizes the widget when the chart is opened or updated. -->
+            <Grid Grid.Row="1" x:Name="MetricsGrid" Margin="0,10,0,0" Height="114">
+                <Grid x:Name="MetricsCards">
+                    <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+                    <Border Grid.Row="0" Grid.Column="0" Style="{StaticResource MetricCard}" Margin="0,0,4,4"><StackPanel><TextBlock Style="{StaticResource MetricLabel}" Text="RUNNING / QUEUED"/><TextBlock x:Name="RunningValue" Style="{StaticResource MetricValue}" HorizontalAlignment="Left" FontSize="16" Text="{Binding RunningText}" ToolTip="{Binding RunningToolTip}"/></StackPanel></Border>
+                    <Border Grid.Row="0" Grid.Column="1" Style="{StaticResource MetricCard}" Margin="4,0,0,4"><StackPanel><TextBlock Style="{StaticResource MetricLabel}" Text="GENERATED"/><TextBlock Style="{StaticResource MetricValue}" HorizontalAlignment="Left" FontSize="16" Text="{Binding GeneratedText}" ToolTip="{Binding GeneratedToolTip}"/></StackPanel></Border>
+                    <Border Grid.Row="1" Grid.Column="0" Style="{StaticResource MetricCard}" Margin="0,4,4,0" Cursor="Hand"
+                            MouseLeftButtonDown="OnShowPrefillHistory" ToolTip="Show prefill activity for the last 5 minutes">
+                        <Grid>
+                            <StackPanel x:Name="PrefillMetricContent"><TextBlock Style="{StaticResource MetricLabel}" Text="PREFILL  ↗"/><TextBlock x:Name="PrefillValue" Style="{StaticResource MetricValue}" HorizontalAlignment="Left" FontSize="16" Text="{Binding PrefillText}"/></StackPanel>
+                            <local:ActivityChart x:Name="PrefillActivityChart" Visibility="Collapsed" Points="{Binding PrefillHistory}" Stroke="{DynamicResource AccentBrush}" ToolTip="5-minute prefill history — click to return"/>
+                        </Grid>
+                    </Border>
+                    <Border Grid.Row="1" Grid.Column="1" Style="{StaticResource MetricCard}" Margin="4,4,0,0" Cursor="Hand"
+                            MouseLeftButtonDown="OnShowGenerateHistory" ToolTip="Show generation activity for the last 5 minutes">
+                        <Grid>
+                            <StackPanel x:Name="GenerateMetricContent"><TextBlock Style="{StaticResource MetricLabel}" Text="GENERATE  ↗"/><TextBlock x:Name="GenerateValue" Style="{StaticResource MetricValue}" HorizontalAlignment="Left" FontSize="16" Text="{Binding GenerateText}"/></StackPanel>
+                            <local:ActivityChart x:Name="GenerateActivityChart" Visibility="Collapsed" Points="{Binding GenerateHistory}" Stroke="{DynamicResource AccentBrush}" ToolTip="5-minute generation history — click to return"/>
+                        </Grid>
+                    </Border>
+                </Grid>
             </Grid>
 
-            <!-- Expanded: separator -->
-            <Separator Grid.Row="3" x:Name="RequestsSeparator" Background="{DynamicResource SeparatorBrush}"
-                       Margin="0,5,0,3" Visibility="Collapsed"/>
+            <Separator Grid.Row="2" x:Name="RequestsSeparator" Margin="0,10,0,8" Background="{DynamicResource SeparatorBrush}" Visibility="Collapsed"/>
+            <!-- Keep request text from participating in the window's desired
+                 width. The metrics grid establishes the widget width; long
+                 counters are trimmed inside that same footprint. -->
+            <Grid Grid.Row="3" x:Name="RequestsPanel" Visibility="Collapsed"
+                  Width="{Binding ActualWidth, ElementName=MetricsGrid}" ClipToBounds="True">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+                <TextBlock Style="{StaticResource MetricLabel}" Text="ACTIVE REQUESTS" Margin="1,0,0,4"/>
+                <Border x:Name="RequestViewport" Grid.Row="1" Height="0" ClipToBounds="True"
+                        Visibility="{Binding RequestsAreaVisibility}">
+                    <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                  CanContentScroll="False" Focusable="False">
+                        <ItemsControl x:Name="RequestList" ItemsSource="{Binding RequestRows}">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border Background="{DynamicResource PanelBrush}" CornerRadius="5" Height="34" Padding="7,2" Margin="0,0,0,3">
+                                        <Grid>
+                                            <Grid.RowDefinitions><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+                                            <TextBlock FontSize="10" FontFamily="Cascadia Mono, Consolas" FontWeight="SemiBold"
+                                                       MinWidth="0"
+                                                       Text="{Binding PrimaryText}" TextTrimming="CharacterEllipsis"/>
+                                            <TextBlock Grid.Row="1" FontSize="9.5" FontFamily="Cascadia Mono, Consolas"
+                                                       MinWidth="0" Foreground="{DynamicResource DimBrush}"
+                                                       Text="{Binding MetricsText}" TextTrimming="CharacterEllipsis"
+                                                       ToolTip="{Binding MetricsText}"/>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+                </Border>
+                <Thumb Grid.Row="2" Height="9" Cursor="SizeNS" DragDelta="OnResizeRequestList"
+                       ToolTip="Drag to show more or fewer request rows">
+                    <Thumb.Template><ControlTemplate TargetType="Thumb">
+                        <Grid Background="Transparent">
+                            <Border Width="34" Height="2" CornerRadius="1" Background="{DynamicResource SoftBorderBrush}"/>
+                        </Grid>
+                    </ControlTemplate></Thumb.Template>
+                </Thumb>
+                <TextBlock Grid.Row="3" x:Name="MoreRequestsText" Style="{StaticResource DimText}" Text="{Binding MoreText}" Visibility="{Binding MoreTextVisibility}"/>
+                <TextBlock Grid.Row="4" x:Name="ModelsText" Style="{StaticResource DimText}" Margin="1,3,0,0" Text="{Binding ModelsInfoText}" Visibility="{Binding ModelsTextVisibility}" TextTrimming="CharacterEllipsis"/>
+            </Grid>
 
-            <!-- Expanded: requests -->
-            <StackPanel Grid.Row="4" x:Name="RequestsPanel" Visibility="Collapsed">
-                <ItemsControl x:Name="RequestList">
-                    <ItemsControl.ItemTemplate>
-                        <DataTemplate>
-                            <TextBlock FontSize="11" FontFamily="Consolas"
-                                       Foreground="{DynamicResource FgBrush}"
-                                       Text="{Binding Line}" TextTrimming="CharacterEllipsis"/>
-                        </DataTemplate>
-                    </ItemsControl.ItemTemplate>
-                </ItemsControl>
-                <TextBlock x:Name="MoreRequestsText" Style="{StaticResource DimText}" FontSize="10.5"/>
-                <TextBlock x:Name="ModelsText" Style="{StaticResource DimText}" FontSize="10.5"
-                           TextTrimming="CharacterEllipsis"/>
-            </StackPanel>
-
-            <!-- Expanded: bottom stats -->
-            <Grid Grid.Row="5" x:Name="BottomStats" Margin="2,3,2,0" Visibility="Collapsed">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="*"/>
-                    <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <TextBlock Grid.Column="0" Style="{StaticResource MetricLabel}" Text="TTFT₁₀"/>
-                <TextBlock Grid.Column="1" x:Name="TtftValue" Style="{StaticResource MetricValue}"
-                           HorizontalAlignment="Left" Margin="6,0,0,0" Text="{Binding TtftText}"/>
-                <TextBlock Grid.Column="2" Style="{StaticResource MetricLabel}" Text="Prefilled"
-                           HorizontalAlignment="Right" Margin="10,0,0,0"/>
-                <TextBlock Grid.Column="3" x:Name="PrefilledValue" Style="{StaticResource MetricValue}"
-                           Text="{Binding PrefilledText}" ToolTip="{Binding PrefilledToolTip}" MinWidth="30"/>
-                <TextBlock Grid.Column="4" Style="{StaticResource MetricLabel}" Text="KV" Margin="10,0,0,0"/>
+            <Grid Grid.Row="4" x:Name="BottomStats" Margin="0,9,0,0" Visibility="Collapsed">
+                <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0"><TextBlock Style="{StaticResource MetricLabel}" Text="TTFT"/><TextBlock x:Name="TtftValue" Style="{StaticResource MetricValue}" HorizontalAlignment="Left" Text="{Binding TtftText}"/></StackPanel>
+                <StackPanel Grid.Column="1"><TextBlock Style="{StaticResource MetricLabel}" Text="PREFILLED" HorizontalAlignment="Center"/><TextBlock x:Name="PrefilledValue" Style="{StaticResource MetricValue}" HorizontalAlignment="Center" Text="{Binding PrefilledText}" ToolTip="{Binding PrefilledToolTip}"/></StackPanel>
+                <StackPanel Grid.Column="2"><TextBlock Style="{StaticResource MetricLabel}" Text="KV CACHE" HorizontalAlignment="Right"/><TextBlock Style="{StaticResource MetricValue}" Text="{Binding KvText}" ToolTip="KV cache usage"/></StackPanel>
             </Grid>
         </Grid>
     </Border>

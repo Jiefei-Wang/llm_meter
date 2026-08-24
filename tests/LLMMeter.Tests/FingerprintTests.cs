@@ -105,6 +105,104 @@ public class FingerprintTests
         Assert.Equal(BackendKind.Unknown, unknown.Kind);
     }
 
+    [Fact]
+    public async Task Ollama_Uses_Official_Lowercase_Api_Shape()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["api/ps"] = (200, """{"models":[{"name":"gemma3","model":"gemma3","size_vram":5333539264,"expires_at":"2030-01-01T00:00:00Z"}]}"""),
+            ["api/version"] = (200, """{"version":"1.2.3"}"""),
+        };
+        var http = new FakeHttp(new Uri("http://x/"), routes);
+        var adapter = new OllamaAdapter();
+
+        Assert.NotNull(await adapter.IdentifyAsync(http, default));
+        var snapshot = await adapter.CollectAsync(http, default);
+        Assert.Equal("gemma3", snapshot.ModelName);
+        Assert.Contains("gemma3", snapshot.LoadedModels);
+        Assert.Contains("gemma3 VRAM", snapshot.Info.Keys);
+    }
+
+    [Fact]
+    public async Task LM_Studio_V1_Uses_Native_Models_And_Loaded_Instances()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["api/v1/models"] = (200, """
+                {"models":[{"type":"llm","key":"google/gemma","display_name":"Gemma",
+                  "loaded_instances":[{"id":"google/gemma","config":{"context_length":4096}}]}]}
+                """),
+        };
+        var http = new FakeHttp(new Uri("http://x/"), routes);
+        var adapter = new LmStudioAdapter();
+
+        Assert.NotNull(await adapter.IdentifyAsync(http, default));
+        var snapshot = await adapter.CollectAsync(http, default);
+        Assert.Equal("google/gemma", snapshot.ModelName);
+        Assert.Equal("4096", snapshot.Info["google/gemma ctx"]);
+    }
+
+    [Fact]
+    public async Task LM_Studio_Does_Not_Accept_Generic_List_At_Native_V1_Path()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["api/v1/models"] = (200, """{"object":"list","data":[{"id":"other","object":"model"}]}"""),
+        };
+        var result = await new LmStudioAdapter().IdentifyAsync(new FakeHttp(new Uri("http://x/"), routes), default);
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task Fingerprinting_Caches_Repeated_Metrics_Request()
+    {
+        var http = new FakeHttp(new Uri("http://x/"), new Dictionary<string, (int, string)>
+        {
+            ["metrics"] = (200, "foreign_metric 1\n"),
+        });
+        var result = await new EndpointFingerprinter(_ => http).FingerprintAsync(http.BaseUrl, default);
+        Assert.Equal(BackendKind.Unknown, result.Kind);
+        Assert.Equal(1, http.Requests.Count(p => p == "metrics"));
+    }
+
+    [Fact]
+    public async Task Vllm_Exposes_Cumulative_Token_Counters()
+    {
+        var http = new FakeHttp(new Uri("http://x/"), new Dictionary<string, (int, string)>
+        {
+            ["metrics"] = (200, """
+                vllm:num_requests_running 1
+                vllm:num_requests_waiting 0
+                vllm:prompt_tokens_total 1200
+                vllm:generation_tokens_total 3456
+                """),
+        });
+        var snapshot = await new VllmAdapter().CollectAsync(http, default);
+
+        Assert.Equal(1200, snapshot.PrefilledTokensTotal.Value);
+        Assert.Equal(3456, snapshot.GeneratedTokensTotal.Value);
+        Assert.Equal(MetricQuality.Exact, snapshot.GeneratedTokensTotal.Quality);
+    }
+
+    [Fact]
+    public void LM_Studio_Recognizes_Empty_Native_Catalogs()
+    {
+        using var v0 = JsonDocument.Parse("""{"object":"list","data":[]}""");
+        using var v1 = JsonDocument.Parse("""{"models":[]}""");
+        Assert.True(LmStudioAdapter.LooksLikeLmStudio(v0.RootElement));
+        Assert.True(LmStudioAdapter.LooksLikeNativeV1(v1.RootElement));
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("{\"models\":{}}")]
+    [InlineData("{\"models\":[{\"size\":1}]}")]
+    public void Ollama_Rejects_Malformed_Process_Lists(string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        Assert.False(OllamaAdapter.LooksLikeOllamaPs(doc.RootElement));
+    }
+
     /// <summary>llama.cpp and Ollama also expose /v1/models — the fingerprinter
     /// must positively identify them before falling through to "generic".</summary>
     [Fact]
@@ -206,7 +304,38 @@ public class FingerprintTests
         var row = Assert.Single(snap.Requests!);
         Assert.Equal("#135", row.Id);
         Assert.Equal(12400, row.InputTokens.Value);
+        Assert.Equal(12400, row.PrefilledTokens.Value);
         Assert.Equal(184, row.OutputTokens.Value);
         Assert.Equal("Qwen.gguf", snap.ModelName);
+    }
+
+    [Fact]
+    public async Task Llama_Metrics_Mode_Still_Enumerates_Active_Slots()
+    {
+        var adapter = new LlamaCppAdapter();
+        var http = new FakeHttp(new Uri("http://x/"), new Dictionary<string, (int, string)>
+        {
+            ["metrics"] = (200, """
+                llamacpp:requests_processing 1
+                llamacpp:requests_deferred 0
+                llamacpp:prompt_tokens_total 100
+                llamacpp:tokens_predicted_total 20
+                """),
+            ["slots"] = (200, """
+                [{"id":0,"is_processing":true,"id_task":42,
+                  "n_prompt_tokens":7,"n_prompt_tokens_processed":9,
+                  "n_prompt_tokens_cache":3,"n_decoded":3}]
+                """),
+        });
+
+        var snap = await adapter.CollectAsync(http, default);
+
+        var request = Assert.Single(Assert.IsAssignableFrom<IReadOnlyList<RequestSnapshot>>(snap.Requests));
+        Assert.Equal("#42", request.Id);
+        Assert.Equal(12, request.InputTokens.Value);
+        Assert.Equal(3, request.CachedTokens.Value);
+        Assert.Equal(9, request.PrefilledTokens.Value);
+        Assert.Equal(3, request.OutputTokens.Value);
+        Assert.True(adapter.Capabilities.HasFlag(BackendCapabilities.ActiveRequestEnumeration));
     }
 }

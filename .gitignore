@@ -1,9 +1,17 @@
 bin/
 obj/
+.tools/
 *.user
 .vs/
+.vscode/
+.idea/
 publish/
 artifacts/
 TestResults/
 *.log
 LLMMeter.log
+*.tmp
+*.bak
+*.broken
+.DS_Store
+Thumbs.db

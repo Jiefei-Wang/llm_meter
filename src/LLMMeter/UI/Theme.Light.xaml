@@ -6,6 +6,8 @@
     <SolidColorBrush x:Key="FgBrush" Color="#1B1B1F"/>
     <SolidColorBrush x:Key="DimBrush" Color="#71717A"/>
     <SolidColorBrush x:Key="HoverBrush" Color="#20000000"/>
+    <SolidColorBrush x:Key="AccentSoftBrush" Color="#180067C0"/>
+    <SolidColorBrush x:Key="SoftBorderBrush" Color="#E7E7EC"/>
     <SolidColorBrush x:Key="PressedBrush" Color="#38000000"/>
     <SolidColorBrush x:Key="SeparatorBrush" Color="#E2E2E8"/>
     <SolidColorBrush x:Key="AccentBrush" Color="#0067C0"/>

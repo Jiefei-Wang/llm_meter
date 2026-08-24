@@ -22,7 +22,8 @@ public sealed class SlotTracker(double emaAlpha = 0.35)
     private readonly Dictionary<int, SlotState> _states = new();
     private readonly double _alpha = Math.Clamp(emaAlpha, 0.05, 1.0);
 
-    public RequestSnapshot? Observe(int slotId, long taskId, long promptTokens, long decoded, long nowTicks, bool processing)
+    public RequestSnapshot? Observe(int slotId, long taskId, long promptTokens, long decoded, long nowTicks,
+        bool processing, long prefilledTokens = -1, long cachedTokens = -1)
     {
         if (!processing)
             return null; // idle/completed slots stop reporting
@@ -67,6 +68,12 @@ public sealed class SlotTracker(double emaAlpha = 0.35)
             Id = taskId >= 0 ? $"#{taskId}" : $"#{slotId}",
             InputTokens = promptTokens >= 0
                 ? MetricValue<long>.Exact(promptTokens, MetricSource.NativeApi, "/slots")
+                : MetricValue<long>.None,
+            CachedTokens = cachedTokens >= 0
+                ? MetricValue<long>.Exact(cachedTokens, MetricSource.NativeApi, "/slots")
+                : MetricValue<long>.None,
+            PrefilledTokens = prefilledTokens >= 0
+                ? MetricValue<long>.Exact(prefilledTokens, MetricSource.NativeApi, "/slots")
                 : MetricValue<long>.None,
             OutputTokens = decoded >= 0
                 ? MetricValue<long>.Exact(decoded, MetricSource.NativeApi, "/slots")

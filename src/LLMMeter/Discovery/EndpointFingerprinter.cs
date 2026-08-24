@@ -30,7 +30,8 @@ public sealed class EndpointFingerprinter
     /// <summary>Identify the endpoint kind. Returns GenericOpenAi or Unknown.</summary>
     public async Task<FingerprintResult> FingerprintAsync(Uri baseUrl, CancellationToken ct)
     {
-        using var http = _httpFactory?.Invoke(baseUrl) ?? HttpService.CreateOwning(baseUrl, ProbeTimeout);
+        using var inner = _httpFactory?.Invoke(baseUrl) ?? HttpService.CreateOwning(baseUrl, ProbeTimeout);
+        using var http = new CachingHttp(inner);
         foreach (var adapter in _ordered)
         {
             try
@@ -57,5 +58,26 @@ public sealed class EndpointFingerprinter
         catch { /* fall through */ }
 
         return new FingerprintResult(BackendKind.Unknown, "no recognized endpoint schema");
+    }
+
+    /// <summary>One fingerprint pass asks several adapters about the same paths.</summary>
+    private sealed class CachingHttp(IHttp inner) : IHttp
+    {
+        private readonly Dictionary<string, Task<(int Status, string Body)>> _responses =
+            new(StringComparer.OrdinalIgnoreCase);
+
+        public Uri BaseUrl => inner.BaseUrl;
+        public TimeSpan Timeout => inner.Timeout;
+
+        public Task<(int Status, string Body)> GetStringAsync(string path, CancellationToken ct)
+        {
+            string key = path.TrimStart('/').TrimEnd('/');
+            if (_responses.TryGetValue(key, out var cached)) return cached;
+            var request = inner.GetStringAsync(key, ct);
+            _responses[key] = request;
+            return request;
+        }
+
+        public void Dispose() { }
     }
 }

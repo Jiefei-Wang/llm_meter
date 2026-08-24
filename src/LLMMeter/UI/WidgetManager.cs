@@ -33,8 +33,7 @@ public sealed class WidgetManager
 
     public MonitorWindow CreateWindow(WindowConfig? restore)
     {
-        var w = new MonitorWindow(this);
-        _windows.Add(w);
+        var w = CreateManagedWindow(restore?.Topmost ?? Services.Config.TopmostByDefault);
 
         if (restore != null)
         {
@@ -48,7 +47,6 @@ public sealed class WidgetManager
             var spot = ScreenGuard.EnsureVisible(x, y, 320, 130);
             w.Left = spot.X; w.Top = spot.Y;
             w.WindowStartupLocation = WindowStartupLocation.Manual;
-            w.Topmost = Services.Config.TopmostByDefault;
             w.Show();
         }
 
@@ -120,8 +118,7 @@ public sealed class WidgetManager
 
     private void CreateWindowForEntry(BackendRegistry.TargetEntry entry)
     {
-        var w = new MonitorWindow(this);
-        _windows.Add(w);
+        var w = CreateManagedWindow(Services.Config.TopmostByDefault);
 
         double x = 120 + (_windows.Count - 1) * 28;
         double y = 140 + (_windows.Count - 1) * 24;
@@ -130,6 +127,14 @@ public sealed class WidgetManager
         w.WindowStartupLocation = WindowStartupLocation.Manual;
         w.Show();
         w.Bind(entry);
+    }
+
+    private MonitorWindow CreateManagedWindow(bool alwaysOnTop)
+    {
+        var window = new MonitorWindow(this);
+        _windows.Add(window);
+        window.SetAlwaysOnTop(alwaysOnTop, queueSave: false);
+        return window;
     }
 
     /// <summary>Rebind to a saved backend id once discovery knows it.</summary>
@@ -239,6 +244,7 @@ public sealed class WidgetManager
             X = w.Persisted.X,
             Y = w.Persisted.Y,
             Scale = w.Persisted.Scale,
+            RequestListHeight = w.Persisted.RequestListHeight,
             Expanded = w.Persisted.Expanded,
             Topmost = w.Persisted.Topmost,
             Visible = w.IsVisible,
@@ -283,11 +289,17 @@ public sealed class WidgetManager
 /// <summary>Process-wide services wired at startup.</summary>
 public sealed class AppServices : IDisposable
 {
+    private int _disposed;
     public required ConfigurationService ConfigService { get; init; }
     public required AppConfiguration Config { get; init; }
     public required BackendRegistry Registry { get; init; }
     public WidgetManager Widgets { get; set; } = null!;
     public TrayService Tray { get; set; } = null!;
 
-    public void Dispose() => Registry.Dispose();
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        try { Tray?.Dispose(); } catch { }
+        Registry.Dispose();
+    }
 }

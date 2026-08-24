@@ -24,12 +24,8 @@ public sealed class LmStudioAdapter : IBackendAdapter
             return new FingerprintResult(Kind, "/api/v0/models matches LM Studio schema");
 
         var v1 = await http.GetJsonAsync("api/v1/models", ct).ConfigureAwait(false);
-        if (v1.HasValue && LooksLikeGenericList(v1.Value))
-        {
-            // /api/v1 alone is not conclusive (many servers serve similar shapes),
-            // but combined with a 404 on /v1/models differences we accept it.
+        if (v1.HasValue && LooksLikeNativeV1(v1.Value))
             return new FingerprintResult(Kind, "/api/v1/models responds with list schema");
-        }
         return null;
     }
 
@@ -45,8 +41,8 @@ public sealed class LmStudioAdapter : IBackendAdapter
                 m.TryGetProperty("compatibility_type", out _))
                 return true;
         }
-        // object:"list" + data is at least consistent; require one known field anywhere
-        return false;
+        // The path itself is LM Studio-specific; an empty catalog is valid.
+        return el.GetProperty("data").GetArrayLength() == 0;
     }
 
     internal static bool LooksLikeGenericList(JsonElement el)
@@ -64,6 +60,21 @@ public sealed class LmStudioAdapter : IBackendAdapter
         return data.GetArrayLength() == 0; // empty list still proves "list" schema
     }
 
+    internal static bool LooksLikeNativeV1(JsonElement el)
+    {
+        if (el.ValueKind != JsonValueKind.Object ||
+            !el.TryGetProperty("models", out var models) || models.ValueKind != JsonValueKind.Array)
+            return false;
+        foreach (var model in models.EnumerateArray())
+        {
+            if (model.ValueKind != JsonValueKind.Object) return false;
+            return model.TryGetProperty("key", out var key) && key.ValueKind == JsonValueKind.String &&
+                   model.TryGetProperty("type", out var type) && type.ValueKind == JsonValueKind.String &&
+                   model.TryGetProperty("loaded_instances", out var loaded) && loaded.ValueKind == JsonValueKind.Array;
+        }
+        return true;
+    }
+
     public async Task<MetricSnapshot> CollectAsync(IHttp http, CancellationToken ct)
     {
         if (_serverVersion is null)
@@ -77,40 +88,55 @@ public sealed class LmStudioAdapter : IBackendAdapter
         var info = new Dictionary<string, string>();
         var models = await http.GetJsonAsync("api/v0/models", ct).ConfigureAwait(false);
 
-        bool rich = models.HasValue && LooksLikeLmStudio(models.Value);
-        if (!rich)
+        bool isV0 = models.HasValue && LooksLikeLmStudio(models.Value);
+        bool isV1 = false;
+        if (!isV0)
         {
             models = await http.GetJsonAsync("api/v1/models", ct).ConfigureAwait(false);
-            if (!models.HasValue || !LooksLikeGenericList(models.Value))
+            isV1 = models.HasValue && LooksLikeNativeV1(models.Value);
+            if (!isV1)
                 return MetricSnapshot.Offline(Kind);
         }
 
         var loaded = new List<string>();
         string? firstLoadedId = null;
 
-        foreach (var m in models!.Value.GetProperty("data").EnumerateArray())
+        if (isV1)
         {
-            if (m.ValueKind != JsonValueKind.Object || !m.TryGetProperty("id", out var idEl)) continue;
-            string id = idEl.GetString() ?? "";
-
-            string stateStr = "";
-            if (m.TryGetProperty("state", out var st) && st.ValueKind == JsonValueKind.String)
-                stateStr = st.GetString() ?? "";
-
-            if (stateStr is "loaded" or "" or "not-loaded")
+            foreach (var m in models!.Value.GetProperty("models").EnumerateArray())
             {
-                if (stateStr == "loaded" || (stateStr == "" && loaded.Count == 0 && rich == false))
+                if (!m.TryGetProperty("key", out var key) || key.ValueKind != JsonValueKind.String ||
+                    !m.TryGetProperty("loaded_instances", out var instances) || instances.ValueKind != JsonValueKind.Array ||
+                    instances.GetArrayLength() == 0) continue;
+                string id = key.GetString() ?? "";
+                if (id.Length == 0) continue;
+                loaded.Add(id);
+                firstLoadedId ??= id;
+                var instance = instances[0];
+                if (instance.ValueKind == JsonValueKind.Object && instance.TryGetProperty("config", out var config) &&
+                    config.ValueKind == JsonValueKind.Object && config.TryGetProperty("context_length", out var ctx) &&
+                    ctx.ValueKind == JsonValueKind.Number)
+                    info[$"{id} ctx"] = $"{ctx.GetInt64():0}";
+            }
+        }
+        else
+        {
+            foreach (var m in models!.Value.GetProperty("data").EnumerateArray())
+            {
+                if (m.ValueKind != JsonValueKind.Object || !m.TryGetProperty("id", out var idEl) || idEl.ValueKind != JsonValueKind.String) continue;
+                string id = idEl.GetString() ?? "";
+                string state = m.TryGetProperty("state", out var st) && st.ValueKind == JsonValueKind.String ? st.GetString() ?? "" : "";
+                if (state == "loaded")
                 {
                     loaded.Add(id);
                     firstLoadedId ??= id;
                 }
-                if (rich && m.TryGetProperty("max_context_length", out var mcl) && mcl.ValueKind == JsonValueKind.Number &&
-                    stateStr == "loaded")
+                if (state == "loaded" && m.TryGetProperty("max_context_length", out var mcl) && mcl.ValueKind == JsonValueKind.Number)
                     info[$"{id} ctx"] = $"{mcl.GetInt64():0}";
             }
         }
 
-        info["API"] = rich ? "REST API v0" : "REST API v1";
+        info["API"] = isV1 ? "REST API v1" : "REST API v0";
         if (_serverVersion is { } sv) info["Server"] = sv;
 
         return new MetricSnapshot

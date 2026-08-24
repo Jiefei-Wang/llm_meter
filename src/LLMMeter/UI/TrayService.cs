@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using LLMMeter.Core;
 
@@ -65,7 +66,9 @@ public sealed class TrayService : IDisposable
             g.FillRectangle(barOn, 13, 11, 6, 16);
             g.FillRectangle(barOff, 21, 5, 6, 22);
         }
-        return Icon.FromHandle(bmp.GetHicon());
+        var handle = bmp.GetHicon();
+        try { return (Icon)Icon.FromHandle(handle).Clone(); }
+        finally { _ = DestroyIcon(handle); }
     }
 
     public void UpdateTooltip(string text)
@@ -78,4 +81,7 @@ public sealed class TrayService : IDisposable
         _icon.Visible = false;
         _icon.Dispose();
     }
+
+    [DllImport("user32.dll")]
+    private static extern bool DestroyIcon(IntPtr handle);
 }

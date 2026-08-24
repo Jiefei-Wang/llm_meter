@@ -118,6 +118,12 @@ public sealed class VllmAdapter : IBackendAdapter
             GenerationTokPerSec = genRate,
             KvCacheUsage = kv,
             RecentTtftMs = ttft,
+            GeneratedTokensTotal = genC.HasValue
+                ? MetricValue<long>.Exact((long)genC.Value, MetricSource.NativeMetrics, "vllm generation token counter")
+                : MetricValue<long>.None,
+            PrefilledTokensTotal = prefillC.HasValue
+                ? MetricValue<long>.Exact((long)prefillC.Value, MetricSource.NativeMetrics, "vllm prompt token counter")
+                : MetricValue<long>.None,
             Requests = null, // /metrics does not enumerate active requests (see spec §27)
             ModelName = _modelName,
             Info = new Dictionary<string, string> { ["Source"] = "/metrics (Prometheus)" },

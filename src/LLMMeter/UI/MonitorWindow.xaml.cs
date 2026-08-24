@@ -1,7 +1,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
-using System.Windows.Threading;
+using System.Windows.Interop;
 using LLMMeter.Core;
 using WindowStateConfig = LLMMeter.Persistence.WindowConfig;
 
@@ -13,7 +13,6 @@ public partial class MonitorWindow : Window
 
     private readonly WidgetManager _manager;
     private readonly MonitorWindowViewModel _vm = new();
-    private readonly DispatcherTimer _poll;
 
     public WindowStateConfig Persisted { get; } = new();
 
@@ -26,31 +25,40 @@ public partial class MonitorWindow : Window
     public double Scale
     {
         get => Persisted.Scale;
-        set => ApplyScale(value);
+        set => ApplyScale(value, snap: false);
     }
 
-    public new bool Topmost
-    {
-        get => base.Topmost;
-        set { base.Topmost = value; Persisted.Topmost = value; }
-    }
+    public bool IsAlwaysOnTop => Persisted.Topmost;
 
     public MonitorWindow(WidgetManager manager)
     {
         InitializeComponent();
         _manager = manager;
         DataContext = _vm;
+        _vm.RequestRows.CollectionChanged += (_, _) => GrowRequestViewportForRows();
+        ContextMenu = new ContextMenu();
         Deactivated += (_, _) => CloseSelectorPopup();
-
-        _poll = new DispatcherTimer(DispatcherPriority.Background)
+        SourceInitialized += (_, _) =>
         {
-            Interval = TimeSpan.FromMilliseconds(300),
+            ApplyTopmostBand();
+            (PresentationSource.FromVisual(this) as HwndSource)?.AddHook(WindowMessageHook);
         };
-        _poll.Tick += (_, _) => _vm.PollLatest();
-        _poll.Start();
+        IsVisibleChanged += (_, _) =>
+        {
+            _vm.SetRenderingActive(IsVisible);
+            if (IsVisible)
+                Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded,
+                    ApplyTopmostBand);
+        };
 
         LocationChanged += (_, _) => SaveBounds();
         SizeChanged += (_, _) => SaveBounds();
+        AddHandler(Mouse.PreviewMouseDownEvent,
+            new MouseButtonEventHandler(OnResizeStart), handledEventsToo: true);
+        AddHandler(Mouse.PreviewMouseMoveEvent,
+            new MouseEventHandler(OnResizeMove), handledEventsToo: true);
+        AddHandler(Mouse.PreviewMouseUpEvent,
+            new MouseButtonEventHandler(OnResizeEnd), handledEventsToo: true);
 
         ApplyScale(1.0);
         ApplyExpanded(false);
@@ -64,7 +72,7 @@ public partial class MonitorWindow : Window
         var collector = _manager.Registry.Collectors.GetOrAdd(entry.Target.Endpoint, KindOrNull(entry));
         _vm.Bind(collector, entry);
         Persisted.BackendId = entry.Target.GroupKey;
-        UpdateHeaderFromEntry(entry);
+        _manager.QueueSave();
     }
 
     private static Core.BackendKind? KindOrNull(BackendRegistry.TargetEntry e) =>
@@ -73,25 +81,14 @@ public partial class MonitorWindow : Window
     public void Unbind()
     {
         _vm.Unbind();
-        HeaderText.Text = "LLM Meter";
-        SubtitleText.Text = "select a backend";
+        Persisted.BackendId = "";
+        _manager.QueueSave();
     }
 
     /// <summary>Shown while discovery hasn't found the backend yet.</summary>
     public void ShowScanning()
     {
-        HeaderText.Text = "LLM Meter";
-        SubtitleText.Text = "scanning for servers…";
-    }
-
-    private void UpdateHeaderFromEntry(BackendRegistry.TargetEntry entry)
-    {
-        string name = entry.ModelName is { Length: > 0 } m
-            ? $"{entry.Target.Kind.DisplayName()} · {m}"
-            : entry.Target.DisplayName;
-        if (name.Length > 42) name = name[..41].TrimEnd() + "…";
-        HeaderText.Text = name;
-        SubtitleText.Text = DescribeOrigin(entry);
+        _vm.ShowScanning();
     }
 
     internal static string DescribeOrigin(BackendRegistry.TargetEntry entry)
@@ -109,7 +106,8 @@ public partial class MonitorWindow : Window
 
     private void OnDragMove(object sender, MouseButtonEventArgs e)
     {
-        if (e.ButtonState == MouseButtonState.Pressed && e.ClickCount == 1)
+        if (_resizeEdge == ResizeEdge.None &&
+            e.ButtonState == MouseButtonState.Pressed && e.ClickCount == 1)
         {
             try { DragMove(); } catch { }
             SaveBounds();
@@ -117,6 +115,64 @@ public partial class MonitorWindow : Window
     }
 
     private void OnToggleExpand(object sender, RoutedEventArgs e) => ApplyExpanded(!IsExpanded);
+
+    private void OnResizeRequestList(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e)
+    {
+        SetRequestViewportHeight(RequestViewport.Height + e.VerticalChange, queueSave: true);
+        e.Handled = true;
+        SaveBounds();
+    }
+
+    private const double RequestRowHeight = 37;
+    private const int AutomaticVisibleRequestRows = 5;
+
+    private void GrowRequestViewportForRows()
+    {
+        // Collection removals intentionally never reduce Height. This retained
+        // high-water mark prevents the whole widget jumping upward as trailing
+        // request slots age out.
+        double required = Math.Min(_vm.RequestRows.Count, AutomaticVisibleRequestRows) * RequestRowHeight;
+        if (required > RequestViewport.Height)
+            SetRequestViewportHeight(required, queueSave: true);
+    }
+
+    private void SetRequestViewportHeight(double height, bool queueSave)
+    {
+        height = Math.Clamp(height, 0, 740);
+        RequestViewport.Height = height;
+        Persisted.RequestListHeight = height;
+        if (queueSave) _manager.QueueSave();
+    }
+
+    private void OnShowPrefillHistory(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        ToggleActivity(PrefillMetricContent, PrefillActivityChart);
+    }
+
+    private void OnShowGenerateHistory(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        ToggleActivity(GenerateMetricContent, GenerateActivityChart);
+    }
+
+    private static void ToggleActivity(UIElement metric, UIElement chart)
+    {
+        bool showChart = chart.Visibility != Visibility.Visible;
+        metric.Visibility = showChart ? Visibility.Collapsed : Visibility.Visible;
+        chart.Visibility = showChart ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void OnToggleTopmost(object sender, RoutedEventArgs e) =>
+        SetAlwaysOnTop(PinButton.IsChecked == true);
+
+    private void OnOpenMenu(object sender, RoutedEventArgs e)
+    {
+        BuildContextMenu();
+        ContextMenu.PlacementTarget = MenuButton;
+        ContextMenu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+        ContextMenu.IsOpen = true;
+    }
 
     private void OnNewWindow(object sender, RoutedEventArgs e) => _manager.CreateWindow(null);
 
@@ -176,12 +232,113 @@ public partial class MonitorWindow : Window
         return best;
     }
 
-    internal void ApplyScale(double value)
+    internal void ApplyScale(double value, bool snap = true)
     {
-        value = ScaleSteps.Aggregate((a, b) => Math.Abs(b - value) < Math.Abs(a - value) ? b : a);
+        value = Math.Clamp(value, 0.65, 2.0);
+        if (snap)
+            value = ScaleSteps.Aggregate((a, b) => Math.Abs(b - value) < Math.Abs(a - value) ? b : a);
         RootScale.ScaleX = RootScale.ScaleY = value;
         Persisted.Scale = value;
         SaveBounds();
+    }
+
+    [Flags]
+    private enum ResizeEdge { None = 0, Left = 1, Top = 2, Right = 4, Bottom = 8 }
+
+    private ResizeEdge _resizeEdge;
+    private Point _resizeStartScreen;
+    private double _resizeStartScale;
+    private double _resizeStartWidth;
+    private double _resizeStartHeight;
+    private double _resizeStartRight;
+    private double _resizeStartBottom;
+
+    private void OnResizeStart(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Left || _resizeEdge != ResizeEdge.None) return;
+        var edge = HitTestResizeEdge(e.GetPosition(RootBorder));
+        if (edge == ResizeEdge.None) return;
+
+        _resizeEdge = edge;
+        _resizeStartScreen = ScreenDip(e);
+        _resizeStartScale = Scale;
+        _resizeStartWidth = ActualWidth;
+        _resizeStartHeight = ActualHeight;
+        _resizeStartRight = Left + ActualWidth;
+        _resizeStartBottom = Top + ActualHeight;
+        // Capture the complete widget subtree rather than the HWND-backed Window.
+        // Capturing the Window is fragile when the pointer starts over a child
+        // control: WPF may transfer capture and end the resize immediately.
+        Mouse.Capture(RootBorder, CaptureMode.SubTree);
+        e.Handled = true;
+    }
+
+    private void OnResizeMove(object sender, MouseEventArgs e)
+    {
+        if (_resizeEdge == ResizeEdge.None)
+        {
+            Cursor = CursorFor(HitTestResizeEdge(e.GetPosition(RootBorder)));
+            return;
+        }
+        if (e.LeftButton != MouseButtonState.Pressed) { EndResize(); return; }
+
+        var current = ScreenDip(e);
+        double dx = current.X - _resizeStartScreen.X;
+        double dy = current.Y - _resizeStartScreen.Y;
+        var ratios = new List<double>(2);
+        if (_resizeEdge.HasFlag(ResizeEdge.Left)) ratios.Add((_resizeStartWidth - dx) / _resizeStartWidth);
+        if (_resizeEdge.HasFlag(ResizeEdge.Right)) ratios.Add((_resizeStartWidth + dx) / _resizeStartWidth);
+        if (_resizeEdge.HasFlag(ResizeEdge.Top)) ratios.Add((_resizeStartHeight - dy) / _resizeStartHeight);
+        if (_resizeEdge.HasFlag(ResizeEdge.Bottom)) ratios.Add((_resizeStartHeight + dy) / _resizeStartHeight);
+        if (ratios.Count == 0) return;
+
+        ApplyScale(_resizeStartScale * ratios.Average(), snap: false);
+        UpdateLayout();
+        if (_resizeEdge.HasFlag(ResizeEdge.Left)) Left = _resizeStartRight - ActualWidth;
+        if (_resizeEdge.HasFlag(ResizeEdge.Top)) Top = _resizeStartBottom - ActualHeight;
+        e.Handled = true;
+    }
+
+    private void OnResizeEnd(object sender, MouseButtonEventArgs e)
+    {
+        if (_resizeEdge == ResizeEdge.None) return;
+        EndResize();
+        e.Handled = true;
+    }
+
+    private void EndResize()
+    {
+        _resizeEdge = ResizeEdge.None;
+        if (Mouse.Captured == RootBorder || RootBorder.IsMouseCaptureWithin)
+            Mouse.Capture(null);
+        _manager.QueueSave();
+    }
+
+    private ResizeEdge HitTestResizeEdge(Point point)
+    {
+        const double grip = 7;
+        ResizeEdge edge = ResizeEdge.None;
+        if (point.X >= -grip && point.X <= grip) edge |= ResizeEdge.Left;
+        else if (point.X >= RootBorder.ActualWidth - grip && point.X <= RootBorder.ActualWidth + grip) edge |= ResizeEdge.Right;
+        if (point.Y >= -grip && point.Y <= grip) edge |= ResizeEdge.Top;
+        else if (point.Y >= RootBorder.ActualHeight - grip && point.Y <= RootBorder.ActualHeight + grip) edge |= ResizeEdge.Bottom;
+        return edge;
+    }
+
+    private static Cursor CursorFor(ResizeEdge edge) => edge switch
+    {
+        ResizeEdge.Left or ResizeEdge.Right => Cursors.SizeWE,
+        ResizeEdge.Top or ResizeEdge.Bottom => Cursors.SizeNS,
+        ResizeEdge.Left | ResizeEdge.Top or ResizeEdge.Right | ResizeEdge.Bottom => Cursors.SizeNWSE,
+        ResizeEdge.Right | ResizeEdge.Top or ResizeEdge.Left | ResizeEdge.Bottom => Cursors.SizeNESW,
+        _ => Cursors.Arrow,
+    };
+
+    private Point ScreenDip(MouseEventArgs e)
+    {
+        var pixels = PointToScreen(e.GetPosition(this));
+        var source = PresentationSource.FromVisual(this);
+        return source?.CompositionTarget?.TransformFromDevice.Transform(pixels) ?? pixels;
     }
 
     private void ApplyExpanded(bool expanded)
@@ -190,10 +347,11 @@ public partial class MonitorWindow : Window
         RequestsSeparator.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
         RequestsPanel.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
         BottomStats.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
-        ExpandButton.Content = expanded ? "︽" : "︾";
+        ExpandButton.Tag = expanded;
         ExpandButton.ToolTip = expanded ? "Collapse" : "Expand details";
         _vm.IncludeDetails = expanded;
         _vm.PollLatest(force: true);
+        _manager.QueueSave();
     }
 
     internal void SaveBounds()
@@ -201,17 +359,25 @@ public partial class MonitorWindow : Window
         if (WindowState != WindowState.Normal) return;
         Persisted.X = Left;
         Persisted.Y = Top;
+        _manager.QueueSave();
     }
 
     // ------------------------------------------------------ context menu
 
-    private void OnContextMenuOpening(object sender, ContextMenuEventArgs e)
-    {
-        var menu = new ContextMenu();
+    private void OnContextMenuOpening(object sender, ContextMenuEventArgs e) => BuildContextMenu();
 
-        var topmost = new MenuItem { Header = "Always on Top", IsCheckable = true, IsChecked = Topmost };
-        topmost.Click += (_, _) => Topmost = topmost.IsChecked;
+    private void BuildContextMenu()
+    {
+        var menu = ContextMenu ?? new ContextMenu();
+        menu.Items.Clear();
+
+        var topmost = new MenuItem { Header = "Always on Top", IsCheckable = true, IsChecked = IsAlwaysOnTop };
+        topmost.Click += (_, _) => SetAlwaysOnTop(topmost.IsChecked);
         menu.Items.Add(topmost);
+
+        var newWindow = new MenuItem { Header = "New Monitor Window", InputGestureText = "Ctrl+N" };
+        newWindow.Click += OnNewWindow;
+        menu.Items.Add(newWindow);
 
         var scale = new MenuItem { Header = "Scale" };
         foreach (var s in ScaleSteps)
@@ -285,14 +451,33 @@ public partial class MonitorWindow : Window
     public void RequestRealClose()
     {
         _realClose = true;
-        _poll.Stop();
+        _vm.Dispose();
         Close();
+    }
+
+    internal void SetAlwaysOnTop(bool enabled, bool queueSave = true)
+    {
+        Persisted.Topmost = enabled;
+        PinButton.IsChecked = enabled;
+        ApplyTopmostBand();
+        if (queueSave) _manager.QueueSave();
+    }
+
+    private void ApplyTopmostBand() => WindowZOrder.Apply(this, Persisted.Topmost);
+
+    private IntPtr WindowMessageHook(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        const int WmDisplayChange = 0x007E;
+        const int WmDwmCompositionChanged = 0x031E;
+        if (message is WmDisplayChange or WmDwmCompositionChanged)
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, ApplyTopmostBand);
+        return IntPtr.Zero;
     }
 
     internal void RestorePersisted(WindowStateConfig cfg)
     {
         Persisted.BackendId = cfg.BackendId;
-        Topmost = cfg.Topmost;
+        SetAlwaysOnTop(cfg.Topmost, queueSave: false);
 
         // Defensive bounds restore (display may have changed).
         double x = double.IsNaN(cfg.X) ? 100 : cfg.X;
@@ -302,7 +487,8 @@ public partial class MonitorWindow : Window
         Top = spot.Y;
         WindowStartupLocation = WindowStartupLocation.Manual;
 
-        ApplyScale(cfg.Scale <= 0 ? 1.0 : cfg.Scale);
+        ApplyScale(cfg.Scale <= 0 ? 1.0 : cfg.Scale, snap: false);
+        SetRequestViewportHeight(cfg.RequestListHeight > 0 ? cfg.RequestListHeight : 0, queueSave: false);
         ApplyExpanded(cfg.Expanded);
 
         if (cfg.Visible) Show();

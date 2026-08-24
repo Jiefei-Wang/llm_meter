@@ -1,62 +1,86 @@
 # LLM Meter
 
-A lightweight Windows tray widget that monitors local LLM inference servers in real time.
-Small frameless desktop widgets show tokens/s, context usage, queue depth, active requests,
-and time-to-first-token — per backend, with honest labeling of where every number came from.
+LLM Meter is a lightweight Windows tray widget for watching local LLM inference servers in real time. It discovers local and WSL backends automatically and presents throughput, queue activity, token totals, cache reuse, and active requests without sending telemetry off the machine.
+
+![LLM Meter monitoring a local llama-server](docs/images/llm-meter-widget.png)
+
+## Highlights
+
+- Live prefill and generation throughput with five-minute activity charts.
+- Running and queued request counts.
+- Stable active-request rows showing input, cached, evaluated, and output tokens.
+- Automatic discovery across Windows listeners, known localhost ports, and WSL.
+- Multiple independent widgets with saved position, scale, expansion, and topmost state.
+- Light and dark themes with per-monitor DPI support.
+- Honest metric provenance: native, derived, or unavailable—never fabricated.
+- Fully local operation with no analytics or cloud dependency.
 
 ## Supported backends
 
-| Backend | Detection | Metrics source |
-|---|---|---|
-| **vLLM** | `/metrics` (`vllm:*` names) | Prometheus counters/gauges/histograms |
-| **llama.cpp server** | `/metrics` (`llamacpp:*`), `/slots`, `/props` | Prometheus + native `/slots` API |
-| **LM Studio** | `/api/v0/models` | REST v0 (+ v1 fallback) |
-| **Ollama** | `/api/version`, `/api/ps`, `/api/tags` | Native API |
-| **Generic OpenAI-compatible** | `/v1/models` shape | Counters only (no token telemetry) |
+| Backend | Detection | Telemetry source |
+| --- | --- | --- |
+| llama.cpp / llama-server | `/metrics` with `llamacpp:*` or `/slots` | Prometheus metrics, `/slots`, and `/props` |
+| vLLM | `/metrics` with `vllm:*` | Prometheus counters, gauges, and histograms |
+| LM Studio | `/api/v0/models` | Native REST API with v1 fallback |
+| Ollama | `/api/version`, `/api/ps`, `/api/tags` | Native REST API |
+| Generic OpenAI-compatible | `/v1/models` response shape | Connectivity and model information only |
 
-## Discovery
+For full llama-server telemetry, start it with `--metrics`. The `/slots` endpoint supplies active-request details and is enabled by default in current llama.cpp releases.
 
-* Probes known ports on localhost (8000, 8080, 1234, 11434 by default).
-* Enumerates Windows TCP listeners via `GetExtendedTcpTable` and fingerprints processes
-  likely to be inference servers (server/llama/vllm/ollama/koboldcpp etc.).
-* Detects WSL distros and probes listeners inside them via `wsl.exe`
-  (UTF-16 output decoded automatically; `localhost` forwarding assumed).
+## Install
 
-## Honest metrics
+Download `LLMMeter.exe` from the [latest GitHub release](https://github.com/Jiefei-Wang/llm_monitor/releases/latest) and run it. The executable is self-contained; a separate .NET installation is not required.
 
-Every displayed value carries its provenance:
-
-* **Exact** — read directly from the backend (native APIs like `/slots` or `/api/ps`).
-* **Approximate** — derived (counter deltas over scrape intervals, EMA-smoothed rates,
-  histogram-sum TTFT estimates). Tooltips explain the derivation.
-* **Unavailable** — the backend simply doesn't expose it; shown as `-`, never guessed.
-
-Rates never go negative across counter resets; stale counters decay to a real zero;
-TTFT windows mix exact single-request deltas with weighted batch averages.
+LLM Meter places its configuration beside the executable in `LLMMeter.json`. Corrupt configuration is backed up with a `.broken` suffix and replaced safely.
 
 ## Usage
 
-* Run `LLMMeter.exe` — a tray icon appears; widgets open for each discovered backend.
-* **Drag** to move · **Ctrl+wheel** or **Ctrl+N/+/-** to scale · double-click the expand
-  button to toggle the request list.
-* Right-click the header or tray icon for the full menu (add manual endpoint,
-  theme, topmost, close widget).
-* Config lives next to the exe as `LLMMeter.json` (atomic writes; corrupt files are
-  backed up as `.broken` and replaced with defaults).
+- Drag the widget to move it.
+- Use `Ctrl` + mouse wheel or the scale menu to resize it.
+- Expand the widget to inspect active requests and additional telemetry.
+- Click a throughput card to switch between its current value and five-minute chart.
+- Use the header or tray menu to add endpoints, switch themes, toggle topmost, or open another widget.
 
-## Build
+The active llama-server request line uses compact, fixed-width fields:
 
-Requires .NET 8 SDK (Windows):
-
-```sh
-dotnet test tests\LLMMeter.Tests\LLMMeter.Tests.csproj     # unit tests
-dotnet publish src\LLMMeter\LLMMeter.csproj -c Release -r win-x64 \
-  --self-contained true -p:PublishSingleFile=true -o publish
+```text
+IN  12.32k·CACHED   512·EVAL 11.81k·OUT    203·61.4/s
 ```
 
-Output: a single ~68 MB self-contained `LLMMeter.exe`.
+`IN` is the total prompt represented by cached plus newly evaluated tokens. `CACHED` is reused KV-cache content, `EVAL` is prompt work performed for the request, and `OUT` is generated output.
+
+## Metric integrity
+
+Every displayed value retains its source and quality:
+
+- **Exact** values come directly from a backend endpoint.
+- **Approximate** values are defensible derivations such as counter deltas, EMA-smoothed rates, or histogram changes.
+- **Unavailable** values are displayed as an em dash instead of being guessed or replaced with zero.
+
+Rates use a monotonic clock, handle counter resets, and do not report negative throughput. One collector is shared by all widgets monitoring the same endpoint.
+
+## Build and test
+
+Requirements: Windows and the .NET 8 SDK.
+
+```powershell
+dotnet test tests\LLMMeter.Tests\LLMMeter.Tests.csproj
+dotnet publish src\LLMMeter\LLMMeter.csproj `
+  -c Release -r win-x64 --self-contained true `
+  -p:PublishSingleFile=true -o publish
+```
+
+The release artifact is `publish\LLMMeter.exe`.
+
+## Automated releases
+
+Pushing a version tag such as `v1.0.0` runs the GitHub Actions release workflow. It tests the project on Windows, builds the self-contained single-file executable, and creates a GitHub release with generated release notes and `LLMMeter.exe` attached.
+
+```powershell
+git tag -a v1.0.0 -m "LLM Meter v1.0.0"
+git push origin v1.0.0
+```
 
 ## Privacy
 
-The app only issues HTTP GETs to localhost endpoints you discovered or configured.
-No prompts, completions, or tokens ever leave your machine; nothing is sent anywhere.
+LLM Meter only makes read-only requests to local endpoints that it discovers or that you configure. It does not store prompt or completion text, upload metrics, or contact an external analytics service.

@@ -1,6 +1,7 @@
 using System.Text;
 using LLMMeter.Core;
 using LLMMeter.Discovery;
+using LLMMeter.UI;
 using Xunit;
 
 namespace LLMMeter.Tests;
@@ -100,6 +101,171 @@ public class PortMappingTests
         // 127.0.0.1 arrives as little-endian dword 0x0100007F
         Assert.Equal("127.0.0.1", WindowsProcessDiscovery.FormatV4(0x0100007F));
         Assert.Equal("0.0.0.0", WindowsProcessDiscovery.FormatV4(0x00000000));
+    }
+}
+
+public class WindowZOrderTests
+{
+    [Fact]
+    public void Topmost_Application_Does_Not_Move_Size_Or_Activate_Window()
+    {
+        Assert.NotEqual(0u, WindowZOrder.ApplyFlags & WindowZOrder.NoMove);
+        Assert.NotEqual(0u, WindowZOrder.ApplyFlags & WindowZOrder.NoSize);
+        Assert.NotEqual(0u, WindowZOrder.ApplyFlags & WindowZOrder.NoActivate);
+        Assert.NotEqual(0u, WindowZOrder.ApplyFlags & WindowZOrder.NoOwnerZOrder);
+    }
+}
+
+public class RateHistoryTests
+{
+    [Fact]
+    public void Keeps_Only_Five_Minutes_And_Preserves_Unavailable_Gaps()
+    {
+        var history = new RateHistory();
+        var now = DateTimeOffset.Now;
+        history.Record(Snapshot(now.AddMinutes(-6), 10, 20));
+        history.Record(Snapshot(now.AddMinutes(-4), 30, 40));
+        history.Record(Snapshot(now.AddMinutes(-3), null, 50));
+
+        var prefill = history.PrefillSnapshot(now);
+        var generate = history.GenerateSnapshot(now);
+
+        Assert.Equal(2, prefill.Count);
+        Assert.Equal(30, prefill[0].Value);
+        Assert.Null(prefill[1].Value);
+        Assert.Equal([40d, 50d], generate.Select(p => p.Value!.Value));
+    }
+
+    [Fact]
+    public void Duplicate_Snapshot_Timestamps_Are_Not_Stored_Twice()
+    {
+        var history = new RateHistory();
+        var now = DateTimeOffset.Now;
+        var snapshot = Snapshot(now, 1, 2);
+        history.Record(snapshot);
+        history.Record(snapshot);
+
+        Assert.Single(history.PrefillSnapshot(now));
+        Assert.Single(history.GenerateSnapshot(now));
+    }
+
+    private static MetricSnapshot Snapshot(DateTimeOffset timestamp, double? prefill, double? generate) => new()
+    {
+        Timestamp = timestamp,
+        State = ConnectionState.Online,
+        Kind = BackendKind.Vllm,
+        PrefillTokPerSec = prefill.HasValue ? MetricValue<double>.Approx(prefill.Value) : MetricValue<double>.None,
+        GenerationTokPerSec = generate.HasValue ? MetricValue<double>.Approx(generate.Value) : MetricValue<double>.None,
+    };
+}
+
+public class ActivityChartTests
+{
+    [Theory]
+    [InlineData(0, 1)]
+    [InlineData(0.8, 1)]
+    [InlineData(7.75, 10)]
+    [InlineData(56.6, 75)]
+    [InlineData(120, 200)]
+    [InlineData(2300, 2500)]
+    public void Y_Axis_Maximum_Rounds_Up_To_A_Readable_Value(double peak, double expected)
+    {
+        Assert.Equal(expected, ActivityChart.NiceScaleMaximum(peak));
+    }
+}
+
+public class RequestSlotListTests
+{
+    private static RequestSnapshot Request(string id, long input, long prefilled, long output = 0, long cached = 0,
+        double? rate = null) => new()
+    {
+        Id = id,
+        InputTokens = MetricValue<long>.Exact(input),
+        CachedTokens = MetricValue<long>.Exact(cached),
+        PrefilledTokens = MetricValue<long>.Exact(prefilled),
+        OutputTokens = MetricValue<long>.Exact(output),
+        TokensPerSecond = rate.HasValue ? MetricValue<double>.Approx(rate.Value) : MetricValue<double>.None,
+    };
+
+    [Fact]
+    public void Row_Shows_Input_Cached_Evaluated_And_Output_Separately()
+    {
+        var slots = new RequestSlotList();
+        slots.Update([Request("#1", 1086, 1071, 10, 15, 1420)], DateTimeOffset.UtcNow);
+
+        Assert.Contains("IN  1.09k", slots.Rows[0].MetricsText);
+        Assert.Contains("CACHED     15", slots.Rows[0].MetricsText);
+        Assert.Contains("EVAL  1.07k", slots.Rows[0].MetricsText);
+        Assert.Contains("OUT     10", slots.Rows[0].MetricsText);
+        Assert.EndsWith("1.4k/s", slots.Rows[0].MetricsText);
+        Assert.DoesNotContain("~", slots.Rows[0].MetricsText);
+    }
+
+    [Fact]
+    public void Input_Updates_While_Prompt_Is_Loaded()
+    {
+        var slots = new RequestSlotList();
+        var now = DateTimeOffset.UtcNow;
+        slots.Update([Request("#1", 1086, 100, 2)], now);
+        slots.Update([Request("#1", 9999, 700, 20)], now.AddSeconds(1));
+
+        Assert.Contains("IN    10k", slots.Rows[0].MetricsText);
+        Assert.Contains("EVAL    700", slots.Rows[0].MetricsText);
+        Assert.Contains("OUT     20", slots.Rows[0].MetricsText);
+    }
+
+    [Fact]
+    public void Completed_Row_Lingers_Then_Becomes_A_Stable_Hole_Reused_First()
+    {
+        var slots = new RequestSlotList();
+        var start = DateTimeOffset.UtcNow;
+        slots.Update([Request("A", 10, 10), Request("B", 20, 20)], start);
+        var first = slots.Rows[0];
+        var second = slots.Rows[1];
+
+        slots.Update([Request("B", 20, 20)], start.AddSeconds(1));
+        Assert.Same(first, slots.Rows[0]);
+        Assert.Contains("completed", slots.Rows[0].PrimaryText);
+
+        slots.Advance(start.AddSeconds(3.9));
+        Assert.True(slots.Rows[0].IsCompleted);
+        slots.Advance(start.AddSeconds(4));
+        Assert.True(slots.Rows[0].IsEmpty);
+        Assert.Same(second, slots.Rows[1]);
+
+        slots.Update([Request("B", 20, 20), Request("C", 30, 5)], start.AddSeconds(5));
+        Assert.Equal("C", slots.Rows[0].RequestId);
+        Assert.Same(second, slots.Rows[1]);
+    }
+
+    [Fact]
+    public void Adds_All_Concurrent_Requests_Without_A_Five_Row_Cap()
+    {
+        var slots = new RequestSlotList();
+        var requests = Enumerable.Range(1, 8).Select(i => Request($"#{i}", i, i)).ToArray();
+        slots.Update(requests, DateTimeOffset.UtcNow);
+        Assert.Equal(8, slots.Rows.Count);
+    }
+
+    [Fact]
+    public void Removes_Only_Trailing_Holes_After_Ten_Empty_Seconds()
+    {
+        var slots = new RequestSlotList();
+        var start = DateTimeOffset.UtcNow;
+        slots.Update([Request("A", 1, 1), Request("B", 2, 2), Request("C", 3, 3)], start);
+        slots.Update([Request("B", 2, 2)], start.AddSeconds(1));
+        slots.Advance(start.AddSeconds(4));
+
+        Assert.Equal(3, slots.Rows.Count);
+        Assert.True(slots.Rows[0].IsEmpty); // interior hole is preserved
+        Assert.True(slots.Rows[2].IsEmpty); // trailing hole can age out
+
+        slots.Advance(start.AddSeconds(13.9));
+        Assert.Equal(3, slots.Rows.Count);
+        slots.Advance(start.AddSeconds(14));
+        Assert.Equal(2, slots.Rows.Count);
+        Assert.True(slots.Rows[0].IsEmpty);
+        Assert.Equal("B", slots.Rows[1].RequestId);
     }
 }
 

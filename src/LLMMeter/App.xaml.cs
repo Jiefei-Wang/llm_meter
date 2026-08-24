@@ -22,7 +22,7 @@ public partial class App : Application
     public static void RequestShutdown()
     {
         try { _services?.Widgets.SaveNow(); } catch { }
-        try { _services?.Dispose(); } catch { }
+        if (_services != null) _services.Widgets.IsShuttingDown = true;
         try { Current?.Shutdown(); } catch { }
     }
 
@@ -135,7 +135,8 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         try { UnregisterHotKey(IntPtr.Zero, HOTKEY_ID); } catch { }
-        try { _services?.Widgets.SaveNow(); } catch { }
+        if (_services?.Widgets.IsShuttingDown != true)
+            try { _services?.Widgets.SaveNow(); } catch { }
         try { _services?.Dispose(); } catch { }
         base.OnExit(e);
     }

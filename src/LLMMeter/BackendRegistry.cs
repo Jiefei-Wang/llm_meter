@@ -30,7 +30,7 @@ public sealed class BackendRegistry : IDisposable
         _discovery = new DiscoveryService(config.Discovery);
 
         foreach (var id in ManualEndpointIds())
-            _discovery.KnownEndpointIds.Add(id);
+            _discovery.AddKnownEndpoint(id);
 
         _discovery.Updated += servers =>
         {
@@ -91,7 +91,7 @@ public sealed class BackendRegistry : IDisposable
         }
 
         var endpoint = MakeEndpointForManual(e);
-        _discovery.KnownEndpointIds.Add(endpoint.Id);
+        _discovery.AddKnownEndpoint(endpoint.Id);
         TargetsChanged?.Invoke();
         return e;
     }
@@ -109,7 +109,7 @@ public sealed class BackendRegistry : IDisposable
 
         string id = $"manual|{new Uri(url).Host}:{new Uri(url).Port}";
         lock (_lock) _discovered.Remove(id);
-        _discovery.KnownEndpointIds.Remove(id);
+        _discovery.RemoveKnownEndpoint(id);
         TargetsChanged?.Invoke();
     }
 

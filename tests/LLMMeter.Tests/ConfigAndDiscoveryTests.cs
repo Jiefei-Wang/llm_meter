@@ -49,7 +49,7 @@ public class ConfigParsingTests : IDisposable
         original.Windows.Add(new WindowConfig
         {
             BackendId = "manual|192.168.1.31:8000",
-            X = 120, Y = 80, Scale = 1.25, Expanded = true, Topmost = true,
+            X = 120, Y = 80, Scale = 1.37, RequestListHeight = 222, Expanded = true, Topmost = true,
         });
         writeSvc.Save(original);
 
@@ -63,7 +63,8 @@ public class ConfigParsingTests : IDisposable
         Assert.Equal("http://192.168.1.31:8000", m.Url);
 
         var w = Assert.Single(loaded.Windows);
-        Assert.Equal(1.25, w.Scale, 3);
+        Assert.Equal(1.37, w.Scale, 3);
+        Assert.Equal(222, w.RequestListHeight);
         Assert.True(w.Expanded);
         Assert.True(w.Topmost);
     }
@@ -121,6 +122,47 @@ public class ConfigParsingTests : IDisposable
 
         Assert.True(File.Exists(_path));
         Assert.False(File.Exists(_path + ".tmp"));
+    }
+
+    [Fact]
+    public void Concurrent_Saves_Are_Serialized()
+    {
+        var svc = new ConfigurationService(_path);
+        Parallel.For(0, 20, i => svc.Save(new AppConfiguration
+        {
+            TopmostByDefault = i % 2 == 0,
+        }));
+
+        var loaded = new ConfigurationService(_path).Load();
+        Assert.NotNull(loaded.Discovery);
+        Assert.False(File.Exists(_path + ".tmp"));
+    }
+}
+
+public class DiscoveryConcurrencyTests
+{
+    [Fact]
+    public async Task TriggerScan_Is_Single_Flight()
+    {
+        int calls = 0;
+        var release = new TaskCompletionSource<IReadOnlyList<DiscoveredServer>>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        using var discovery = new DiscoveryService(new DiscoveryConfig(), _ =>
+        {
+            Interlocked.Increment(ref calls);
+            return release.Task;
+        });
+        var updated = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        discovery.Updated += _ => updated.TrySetResult();
+
+        discovery.TriggerScan();
+        discovery.TriggerScan();
+        await Task.Delay(25);
+        Assert.Equal(1, Volatile.Read(ref calls));
+
+        release.SetResult([]);
+        await updated.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.Equal(1, Volatile.Read(ref calls));
     }
 }
 

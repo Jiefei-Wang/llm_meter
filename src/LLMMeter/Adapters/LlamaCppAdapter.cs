@@ -19,6 +19,7 @@ public sealed class LlamaCppAdapter : IBackendAdapter
     private readonly SlotTracker _slots = new();
     // /metrics state
     private bool? _metricsEnabled;
+    private bool _slotsAvailable;
     private long _lastTicks;
 
     // /props state
@@ -46,9 +47,16 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             ? BackendCapabilities.QueuedRequests
               | BackendCapabilities.AggregatePrefillRate
               | BackendCapabilities.RecentRequestTtft
+              | (_slotsAvailable
+                  ? BackendCapabilities.ActiveRequestEnumeration
+                    | BackendCapabilities.PerRequestInputTokens
+                    | BackendCapabilities.PerRequestOutputTokens
+                    | BackendCapabilities.PerRequestGenerationRate
+                  : 0)
             : 0)
         | (_metricsEnabled == false
             ? BackendCapabilities.ActiveRequestEnumeration
+              | BackendCapabilities.AggregatePrefillRate
               | BackendCapabilities.PerRequestInputTokens
               | BackendCapabilities.PerRequestOutputTokens
               | BackendCapabilities.PerRequestGenerationRate
@@ -102,23 +110,78 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             }
         }
 
+        // Fetch these together. /metrics can be a relatively expensive scrape on
+        // a busy server, and waiting for it before /slots made the UI feel stale.
+        // /slots is also needed for the active-request rows: Prometheus only has
+        // aggregate request gauges.
+        var metricsTask = http.GetStringAsync("metrics", ct);
+        var slotsTask = http.GetJsonAsync("slots", ct);
+        await Task.WhenAll(metricsTask, slotsTask).ConfigureAwait(false);
+        var (status, body) = await metricsTask.ConfigureAwait(false);
+        var slots = await slotsTask.ConfigureAwait(false);
+
         // --- /metrics path
-        var (status, body) = await http.GetStringAsync("metrics", ct).ConfigureAwait(false);
         if (status == 200 && body.Contains("llamacpp:", StringComparison.Ordinal))
         {
             _metricsEnabled = true;
-            return CollectFromMetrics(body, info, now);
+            _slotsAvailable = slots.HasValue && slots.Value.ValueKind == JsonValueKind.Array;
+            var snapshot = CollectFromMetrics(body, info, now);
+            return _slotsAvailable
+                ? WithRequests(snapshot, CollectRequestRows(slots!.Value, now))
+                : snapshot;
         }
 
         // --- /slots fallback
         _metricsEnabled = false;
-        var slots = await http.GetJsonAsync("slots", ct).ConfigureAwait(false);
+        _slotsAvailable = slots.HasValue && slots.Value.ValueKind == JsonValueKind.Array;
         if (!slots.HasValue || slots.Value.ValueKind != JsonValueKind.Array)
             return MetricSnapshot.Offline(Kind);
 
         _lastTicks = now;
         return CollectFromSlots(slots.Value, info, now);
     }
+
+    private IReadOnlyList<RequestSnapshot> CollectRequestRows(JsonElement arr, long now)
+    {
+        var requests = new List<RequestSnapshot>();
+        foreach (var slot in arr.EnumerateArray())
+        {
+            bool processing =
+                (slot.TryGetProperty("is_processing", out var ip) && ip.ValueKind == JsonValueKind.True) ||
+                (slot.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.String &&
+                 st.GetString() is { } status && status.Equals("processing", StringComparison.OrdinalIgnoreCase));
+            if (!processing) continue;
+
+            int id = slot.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.Number ? idEl.GetInt32() : -1;
+            long task = slot.TryGetProperty("id_task", out var tk) && tk.ValueKind == JsonValueKind.Number ? tk.GetInt64() : -1;
+            long prompt = ReadNPrompt(slot);
+            long evaluated = ReadNProcessed(slot);
+            long cached = ReadNCached(slot);
+            long input = evaluated >= 0 && cached >= 0 ? evaluated + cached : prompt;
+            var request = _slots.Observe(id, task, input, ReadNDecoded(slot), now, true, evaluated, cached);
+            if (request is not null) requests.Add(request);
+        }
+        return requests;
+    }
+
+    private static MetricSnapshot WithRequests(MetricSnapshot snapshot, IReadOnlyList<RequestSnapshot> requests) => new()
+    {
+        Timestamp = snapshot.Timestamp,
+        State = snapshot.State,
+        Kind = snapshot.Kind,
+        Running = snapshot.Running,
+        Queued = snapshot.Queued,
+        PrefillTokPerSec = snapshot.PrefillTokPerSec,
+        GenerationTokPerSec = snapshot.GenerationTokPerSec,
+        KvCacheUsage = snapshot.KvCacheUsage,
+        RecentTtftMs = snapshot.RecentTtftMs,
+        GeneratedTokensTotal = snapshot.GeneratedTokensTotal,
+        PrefilledTokensTotal = snapshot.PrefilledTokensTotal,
+        Requests = requests,
+        ModelName = snapshot.ModelName,
+        LoadedModels = snapshot.LoadedModels,
+        Info = snapshot.Info,
+    };
 
     private MetricSnapshot CollectFromMetrics(
         string body, Dictionary<string, string> info, long now)
@@ -199,6 +262,8 @@ public sealed class LlamaCppAdapter : IBackendAdapter
         var requests = new List<RequestSnapshot>();
         double decodedTotal = 0;
         double prefillProcessedTotal = 0;
+        bool hasDecoded = false;
+        bool hasPrefillProgress = false;
 
         foreach (var slot in arr.EnumerateArray())
         {
@@ -212,41 +277,41 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             long task = slot.TryGetProperty("id_task", out var tk) && tk.ValueKind == JsonValueKind.Number ? tk.GetInt64() : -1;
 
             long nDecoded = ReadNDecoded(slot);
-            long nPrompt = slot.TryGetProperty("n_prompt_tokens", out var np) && np.ValueKind == JsonValueKind.Number ? np.GetInt64() : -1;
-            decodedTotal += Math.Max(0, nDecoded);
+            long nPrompt = ReadNPrompt(slot);
+            if (nDecoded >= 0) { decodedTotal += nDecoded; hasDecoded = true; }
 
             // Accumulate positive n_decoded deltas toward the running total.
-            if (nDecoded >= 0 && _slotLastDecoded.TryGetValue(id, out var prev))
+            if (id >= 0 && nDecoded >= 0 && _slotLastDecoded.TryGetValue(id, out var prev))
             {
                 if (nDecoded > prev) _generatedTotal += nDecoded - prev;
             }
-            _slotLastDecoded[id] = nDecoded;
+            if (id >= 0 && nDecoded >= 0) _slotLastDecoded[id] = nDecoded;
 
             // Prefill progress is tracked only while the slot is actually
             // processing; once generation begins the processed count is static.
+            long processed = -1;
             if (isProcessing)
             {
-                prefillProcessedTotal += ReadNProcessed(slot);
-
-                long processed = ReadNProcessed(slot);
-                if (processed >= 0 && _slotLastProcessed.TryGetValue(id, out var prevProc))
+                processed = ReadNProcessed(slot);
+                if (processed >= 0) { prefillProcessedTotal += processed; hasPrefillProgress = true; }
+                if (id >= 0 && processed >= 0 && _slotLastProcessed.TryGetValue(id, out var prevProc))
                 {
                     if (processed > prevProc) _prefilledTotal += processed - prevProc;
                 }
-                if (processed >= 0) _slotLastProcessed[id] = processed;
+                if (id >= 0 && processed >= 0) _slotLastProcessed[id] = processed;
             }
 
-            var req = _slots.Observe(id, task, nPrompt, nDecoded, now, isProcessing);
+            long cached = ReadNCached(slot);
+            long input = processed >= 0 && cached >= 0 ? processed + cached : nPrompt;
+            var req = _slots.Observe(id, task, input, nDecoded, now, isProcessing, processed, cached);
             if (req != null && isProcessing) requests.Add(req);
         }
 
         // Aggregate generation rate from total decoded tokens across slots.
-        var genRate = _gen.Update(decodedTotal, now);
+        var genRate = hasDecoded ? _gen.Update(decodedTotal, now) : MetricValue<double>.None;
         // Aggregate prefill rate from total prompt tokens processed across slots.
-        var prefillRate = _prefill.Update(prefillProcessedTotal, now);
-        var running = processing > 0 || arr.GetArrayLength() >= 0
-            ? MetricValue<int>.Exact(processing, MetricSource.NativeApi, "/slots processing count")
-            : MetricValue<int>.Exact(0, MetricSource.NativeApi, "/slots");
+        var prefillRate = hasPrefillProgress ? _prefill.Update(prefillProcessedTotal, now) : MetricValue<double>.None;
+        var running = MetricValue<int>.Exact(processing, MetricSource.NativeApi, "/slots processing count");
 
         var state = ConnectionState.Limited; // metrics disabled => limited by definition
 
@@ -292,6 +357,20 @@ public sealed class LlamaCppAdapter : IBackendAdapter
         return -1;
     }
 
+    internal static long ReadNCached(JsonElement slot)
+    {
+        if (slot.TryGetProperty("n_prompt_tokens_cache", out var nc) && nc.ValueKind == JsonValueKind.Number)
+            return nc.GetInt64();
+        return -1;
+    }
+
+    private static long ReadNPrompt(JsonElement slot)
+    {
+        if (slot.TryGetProperty("n_prompt_tokens", out var np) && np.ValueKind == JsonValueKind.Number)
+            return np.GetInt64();
+        return -1;
+    }
+
     internal static long ReadNDecoded(JsonElement slot)
     {
         if (slot.TryGetProperty("n_decoded", out var nd) && nd.ValueKind == JsonValueKind.Number)
@@ -313,10 +392,10 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             metricsOn ? "Full telemetry via /metrics" : "Limited telemetry",
             metricsOn
                 ? ["Running requests", "Queue", "Prefill throughput", "Generation throughput"]
-                : ["Running requests", "Per-slot generation rate"],
+                : ["Running requests", "Per-slot prefill and generation rates"],
             metricsOn
                 ? []
-                : ["Queue depth", "Prefill throughput", "KV-cache usage"],
+                : ["Queue depth", "KV-cache usage"],
             "llama-server ... --metrics",
             _currentCommand);
     }

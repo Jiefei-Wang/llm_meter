@@ -17,6 +17,7 @@ public sealed class DiscoveryService : IDisposable
     public static readonly TimeSpan RescanInterval = TimeSpan.FromSeconds(12);
 
     private readonly DiscoveryConfig _config;
+    private readonly Func<CancellationToken, Task<IReadOnlyList<DiscoveredServer>>>? _scanOverride;
     private readonly EndpointFingerprinter _fingerprinter = new();
     private readonly SemaphoreSlim _probeGate = new(8, 8);
     private readonly CancellationTokenSource _cts = new();
@@ -24,13 +25,21 @@ public sealed class DiscoveryService : IDisposable
 
     private Timer? _timer;
     private Task? _inFlight;
+    private int _disposed;
 
     /// <summary>Endpoints already known (manual config) — skipped in results.</summary>
-    public HashSet<string> KnownEndpointIds { get; } = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _knownEndpointIds = new(StringComparer.OrdinalIgnoreCase);
 
     public event Action<IReadOnlyList<DiscoveredServer>>? Updated;
 
     public DiscoveryService(DiscoveryConfig config) => _config = config;
+
+    internal DiscoveryService(DiscoveryConfig config,
+        Func<CancellationToken, Task<IReadOnlyList<DiscoveredServer>>> scanOverride)
+    {
+        _config = config;
+        _scanOverride = scanOverride;
+    }
 
     public void Start()
     {
@@ -39,22 +48,35 @@ public sealed class DiscoveryService : IDisposable
 
     public void TriggerScan()
     {
-        var scanTyped = ScanOnceAsync(_cts.Token);
         lock (_lock)
         {
-            if (_inFlight != null)
-                return; // duplicate scan attempt; let the running one finish
-            _inFlight = scanTyped;
+            if (_inFlight is { IsCompleted: false }) return;
+            _inFlight = RunScanAndPublishAsync();
         }
-        _ = scanTyped.ContinueWith(t =>
+    }
+
+    private async Task RunScanAndPublishAsync()
+    {
+        // Prevent synchronous completion from racing the _inFlight assignment.
+        await Task.Yield();
+        try
+        {
+            var result = await (_scanOverride?.Invoke(_cts.Token) ?? ScanOnceAsync(_cts.Token)).ConfigureAwait(false);
+            Updated?.Invoke(result);
+        }
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
+        catch (Exception ex)
+        {
+            Log.Warn($"discovery scan failed: {ex.GetBaseException().Message}");
+        }
+        finally
         {
             lock (_lock) _inFlight = null;
-            if (t.Status == TaskStatus.RanToCompletion)
-                Updated?.Invoke(t.Result);
-            else if (t.Exception != null)
-                Log.Warn($"discovery scan failed: {t.Exception.GetBaseException().Message}");
-        }, TaskScheduler.Default);
+        }
     }
+
+    public void AddKnownEndpoint(string id) { lock (_lock) _knownEndpointIds.Add(id); }
+    public void RemoveKnownEndpoint(string id) { lock (_lock) _knownEndpointIds.Remove(id); }
 
     public async Task<IReadOnlyList<DiscoveredServer>> ScanOnceAsync(CancellationToken ct)
     {
@@ -135,9 +157,10 @@ public sealed class DiscoveryService : IDisposable
             };
             lock (_lock)
             {
-                if (KnownEndpointIds.Contains(key)) continue;
+                if (_knownEndpointIds.Contains(key)) continue;
             }
-            if (!seenUrls.Add(c.url.AbsoluteUri)) continue;
+            string dedupeKey = $"{c.origin}|{c.distro}|{c.url.AbsoluteUri}";
+            if (!seenUrls.Add(dedupeKey)) continue;
             toProbe.Add(c);
         }
 
@@ -198,9 +221,20 @@ public sealed class DiscoveryService : IDisposable
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _cts.Cancel();
         _timer?.Dispose();
-        _probeGate.Dispose();
-        _cts.Dispose();
+        Task? scan;
+        lock (_lock) scan = _inFlight;
+        if (scan is null or { IsCompleted: true })
+            Cleanup();
+        else
+            _ = scan.ContinueWith(_ => Cleanup(), TaskScheduler.Default);
+
+        void Cleanup()
+        {
+            _probeGate.Dispose();
+            _cts.Dispose();
+        }
     }
 }

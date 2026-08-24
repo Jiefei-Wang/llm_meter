@@ -13,6 +13,8 @@ public sealed class RequestSnapshot
 {
     public required string Id { get; init; }
     public MetricValue<long> InputTokens { get; init; } = MetricValue<long>.None;
+    public MetricValue<long> CachedTokens { get; init; } = MetricValue<long>.None;
+    public MetricValue<long> PrefilledTokens { get; init; } = MetricValue<long>.None;
     public MetricValue<long> OutputTokens { get; init; } = MetricValue<long>.None;
     public MetricValue<double> TokensPerSecond { get; init; } = MetricValue<double>.None;
 }

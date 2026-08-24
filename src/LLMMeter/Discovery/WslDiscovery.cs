@@ -84,18 +84,23 @@ public static class WslDiscovery
 
     public static async Task<List<WslDistroInfo>> ScanAsync(CancellationToken ct)
     {
-        var result = new List<WslDistroInfo>();
-        if (!IsWslInstalled()) return result;
+        if (!IsWslInstalled()) return [];
 
         var distros = await GetRunningDistrosAsync(ct).ConfigureAwait(false);
-        foreach (var d in distros)
+        using var gate = new SemaphoreSlim(4, 4);
+        var tasks = distros.Select(async d =>
         {
-            var ports = await GetListeningPortsAsync(d, ct).ConfigureAwait(false);
-            string? ip = null;
-            if (ports.Count > 0)
-                ip = await GetDistroIpAsync(d, ct).ConfigureAwait(false);
-            result.Add(new WslDistroInfo(d, ports, ip));
-        }
-        return result;
+            await gate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                var ports = await GetListeningPortsAsync(d, ct).ConfigureAwait(false);
+                string? ip = ports.Count > 0
+                    ? await GetDistroIpAsync(d, ct).ConfigureAwait(false)
+                    : null;
+                return new WslDistroInfo(d, ports, ip);
+            }
+            finally { gate.Release(); }
+        });
+        return [.. await Task.WhenAll(tasks).ConfigureAwait(false)];
     }
 }

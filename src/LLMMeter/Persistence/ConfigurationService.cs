@@ -17,6 +17,7 @@ public sealed class WindowConfig
     public double X { get; set; } = double.NaN;
     public double Y { get; set; } = double.NaN;
     public double Scale { get; set; } = 1.0;
+    public double RequestListHeight { get; set; }
     public bool Expanded { get; set; }
     public bool Topmost { get; set; }
     public bool Visible { get; set; } = true;
@@ -63,6 +64,7 @@ public sealed class DiscoveryConfig
 /// </summary>
 public sealed class ConfigurationService
 {
+    private readonly object _saveLock = new();
     private static readonly JsonSerializerOptions WriteOptions = new()
     {
         WriteIndented = true,
@@ -139,6 +141,11 @@ public sealed class ConfigurationService
 
     /// <summary>Atomic save: temp file + flush + replace.</summary>
     public void Save(AppConfiguration cfg)
+    {
+        lock (_saveLock) SaveCore(cfg);
+    }
+
+    private void SaveCore(AppConfiguration cfg)
     {
         var dir = Path.GetDirectoryName(ConfigPath);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);

@@ -38,12 +38,12 @@ public sealed class OllamaAdapter : IBackendAdapter
     internal static bool LooksLikeOllamaPs(JsonElement el)
     {
         if (el.ValueKind != JsonValueKind.Object) return false;
-        if (!el.TryGetProperty("Models", out var models) || models.ValueKind != JsonValueKind.Array) return false;
+        if (!TryGet(el, "models", "Models", out var models) || models.ValueKind != JsonValueKind.Array) return false;
 
         foreach (var m in models.EnumerateArray())
         {
             if (m.ValueKind != JsonValueKind.Object) continue;
-            bool hasName = m.TryGetProperty("Name", out _) || m.TryGetProperty("Model", out _);
+            bool hasName = TryGet(m, "name", "Name", out _) || TryGet(m, "model", "Model", out _);
             return hasName;
         }
         return true; // empty Models array is valid Ollama
@@ -66,17 +66,18 @@ public sealed class OllamaAdapter : IBackendAdapter
         var loaded = new List<string>();
         string? first = null;
 
-        foreach (var m in ps.Value.GetProperty("Models").EnumerateArray())
+        TryGet(ps.Value, "models", "Models", out var models);
+        foreach (var m in models.EnumerateArray())
         {
             if (m.ValueKind != JsonValueKind.Object) continue;
-            string name = m.TryGetProperty("Name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString()! : "";
+            string name = TryGet(m, "name", "Name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString()! : "";
             if (name.Length == 0) continue;
             loaded.Add(name);
             first ??= name;
 
-            if (m.TryGetProperty("SizeVRAM", out var vr) && vr.ValueKind == JsonValueKind.Number)
+            if (TryGet(m, "size_vram", "SizeVRAM", out var vr) && vr.ValueKind == JsonValueKind.Number)
                 info[$"{name} VRAM"] = FormatBytes(vr.GetDouble());
-            if (m.TryGetProperty("ExpiresAt", out var ex) && ex.ValueKind == JsonValueKind.String &&
+            if (TryGet(m, "expires_at", "ExpiresAt", out var ex) && ex.ValueKind == JsonValueKind.String &&
                 DateTimeOffset.TryParse(ex.GetString(), out var exp))
             {
                 var keep = exp - DateTimeOffset.Now;
@@ -105,6 +106,9 @@ public sealed class OllamaAdapter : IBackendAdapter
             Info = info,
         };
     }
+
+    private static bool TryGet(JsonElement element, string current, string legacy, out JsonElement value) =>
+        element.TryGetProperty(current, out value) || element.TryGetProperty(legacy, out value);
 
     internal static string FormatBytes(double b) =>
         b >= 1 << 30 ? $"{b / (1 << 30):0.0#} GB" :

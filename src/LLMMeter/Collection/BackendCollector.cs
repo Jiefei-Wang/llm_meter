@@ -23,9 +23,9 @@ public sealed class BackendCollector : IDisposable
     private IBackendAdapter? _adapter;
     private MetricSnapshot? _latest;
     private ConnectionState? _lastLoggedState;
-    private long _lastSuccessTicks;
     private int _consecutiveFailures;
     private Task _loop = null!;
+    private int _disposed;
 
     public event Action<MetricSnapshot>? SnapshotUpdated;
 
@@ -46,7 +46,7 @@ public sealed class BackendCollector : IDisposable
 
     public EndpointRef Endpoint => _endpoint;
     public BackendKind? KnownKind { get; private set; }
-    public MetricSnapshot? Latest => _latest;
+    public MetricSnapshot? Latest => Volatile.Read(ref _latest);
 
     private static IBackendAdapter CreateAdapter(BackendKind kind) => kind switch
     {
@@ -99,7 +99,6 @@ public sealed class BackendCollector : IDisposable
                 if (snapshot.State != ConnectionState.Offline)
                 {
                     _consecutiveFailures = 0;
-                    _lastSuccessTicks = MonoClock.NowTicks;
                 }
                 else
                 {
@@ -131,15 +130,25 @@ public sealed class BackendCollector : IDisposable
 
     private void Publish(MetricSnapshot s)
     {
-        _latest = s;
+        Volatile.Write(ref _latest, s);
         SnapshotUpdated?.Invoke(s);
     }
 
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         try { _cts.Cancel(); } catch { }
-        _client.Dispose();
-        _cts.Dispose();
+        SnapshotUpdated = null;
+        if (_loop is null || _loop.IsCompleted)
+            Cleanup();
+        else
+            _ = _loop.ContinueWith(_ => Cleanup(), TaskScheduler.Default);
+
+        void Cleanup()
+        {
+            _client.Dispose();
+            _cts.Dispose();
+        }
     }
 
     /// <summary>Non-owning IHttp over the collector's shared client.</summary>
