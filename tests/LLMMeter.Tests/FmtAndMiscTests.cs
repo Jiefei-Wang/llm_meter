@@ -199,6 +199,7 @@ public class RequestSlotListTests
         Assert.Contains("OUT: 10    ", slots.Rows[0].MetricsText);
         Assert.EndsWith("1.4k/s", slots.Rows[0].MetricsText);
         Assert.DoesNotContain("~", slots.Rows[0].MetricsText);
+        Assert.DoesNotContain(Environment.NewLine, slots.Rows[0].MetricsText);
     }
 
     [Fact]

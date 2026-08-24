@@ -59,6 +59,7 @@ Requirements for this line:
 - Labels are `IN:`, `CACHED:`, `EVAL:`, and `OUT:`.
 - Each value, including speed, reserves six monospace characters and is right-padded when shorter so values remain left-aligned.
 - Put spaces around each `·` separator so it does not touch a value or the following label.
+- Render all request statistics on one line and make the fixed widget width wide enough to show the complete text without ellipsis.
 - Do not show the approximate `~` prefix on per-request speed.
 - Keep a constant font size. Do not use a `Viewbox` or dynamic font scaling.
 - Constrain request cards to the metrics-grid/widget width. Long text may use trimming only as a final safety measure; it must never widen the window.

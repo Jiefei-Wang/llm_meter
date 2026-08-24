@@ -78,7 +78,7 @@
 
             <!-- Both views share one fixed footprint so SizeToContent never
                  resizes the widget when the chart is opened or updated. -->
-            <Grid Grid.Row="1" x:Name="MetricsGrid" Margin="0,10,0,0" Height="114">
+            <Grid Grid.Row="1" x:Name="MetricsGrid" Margin="0,10,0,0" Width="400" Height="114">
                 <Grid x:Name="MetricsCards">
                     <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
                     <Grid.RowDefinitions><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
@@ -127,7 +127,7 @@
                                                        Text="{Binding PrimaryText}" TextTrimming="CharacterEllipsis"/>
                                             <TextBlock Grid.Row="1" FontSize="9.5" FontFamily="Cascadia Mono, Consolas"
                                                        MinWidth="0" Foreground="{DynamicResource DimBrush}"
-                                                       Text="{Binding MetricsText}" TextTrimming="CharacterEllipsis"
+                                                       Text="{Binding MetricsText}" TextWrapping="NoWrap"
                                                        ToolTip="{Binding MetricsText}"/>
                                         </Grid>
                                     </Border>
