@@ -162,8 +162,10 @@ public static class WindowsProcessDiscovery
             "llama-server" or "llama-cli" or "llama-server.exe" => true,
             "ollama" or "ollama_llama_server" or "ollama app" => true,
             "lm studio" or "lm-studio" or "lms" => true,
+            "ninfer" or "ninfer-serve" or "ninfer.exe" or "ninfer-serve.exe" => true,
             "python" or "python3" or "pythonw" or "py" or "vllm" => true, // confirm via cmdline/HTTP
             _ => false,
         };
     }
+
 }

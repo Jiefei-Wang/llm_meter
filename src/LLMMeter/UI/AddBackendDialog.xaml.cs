@@ -17,7 +17,7 @@ public partial class AddBackendDialog : Window
         _services = services;
         TypeBox.ItemsSource = new[]
         {
-            "Auto detect", "vLLM", "llama-server", "LM Studio", "Ollama", "OpenAI-compatible",
+            "Auto detect", "vLLM", "llama-server", "LM Studio", "Ollama", "OpenAI-compatible", "NInfer",
         };
         TypeBox.SelectedIndex = 0;
         UrlBox.Focus();
@@ -71,7 +71,15 @@ public partial class AddBackendDialog : Window
                 Type = MapType(TypeBox.SelectedItem as string ?? "Auto detect"),
             };
             if (!string.IsNullOrWhiteSpace(TokenBox.Password))
-                manual.PlainTextApiKey = TokenBox.Password.Trim();
+            {
+                if (!CredentialProtection.TryProtect(TokenBox.Password.Trim(), out var protectedKey))
+                {
+                    ResultText.Text = "Could not securely store API token";
+                    AddButton.IsEnabled = true;
+                    return;
+                }
+                manual.ApiKey = protectedKey;
+            }
             await _services.Registry.AddManualEndpointAsync(manual);
 
             // bind the newest window (or create one) to it right away
@@ -100,8 +108,10 @@ public partial class AddBackendDialog : Window
         "LM Studio" => "LmStudio",
         "Ollama" => "Ollama",
         "OpenAI-compatible" => "OpenAi",
+        "NInfer" => "NInfer",
         _ => "Auto",
     };
+
 
     private void OnCancel(object sender, RoutedEventArgs e) => Close();
 }

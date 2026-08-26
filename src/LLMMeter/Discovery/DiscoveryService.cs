@@ -217,12 +217,20 @@ public sealed class DiscoveryService : IDisposable
                 try
                 {
                     var fp = await _fingerprinter.FingerprintAsync(c.url, ct).ConfigureAwait(false);
-                    if (fp.Kind != BackendKind.Unknown)
+                    var kind = fp.Kind;
+                    if ((kind == BackendKind.GenericOpenAi || kind == BackendKind.Unknown) &&
+                        (c.hint.Contains("ninfer-serve", StringComparison.OrdinalIgnoreCase) ||
+                         c.hint.Contains("ninfer", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        kind = BackendKind.NInfer;
+                    }
+                    if (kind != BackendKind.Unknown)
                     {
                         string id = MakeId(c.origin, c.distro, c.url);
                         var endpoint = new EndpointRef(id, c.url, c.origin, c.distro);
-                        found.Add(new DiscoveredServer(endpoint, fp.Kind, $"{c.hint}; {fp.Evidence}"));
+                        found.Add(new DiscoveredServer(endpoint, kind, $"{c.hint}; {fp.Evidence}"));
                     }
+
                 }
                 finally
                 {

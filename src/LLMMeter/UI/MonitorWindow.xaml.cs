@@ -76,11 +76,13 @@ public partial class MonitorWindow : Window
             Persisted.PrefilledUsageBaseline = null;
             _vm.SetUsageBaselines(null, null);
         }
-        var collector = _manager.Registry.Collectors.GetOrAdd(entry.Target.Endpoint, KindOrNull(entry));
+        var modelId = entry.Target.RequiresModelScopedCollector ? entry.Target.ModelId : null;
+        var collector = _manager.Registry.Collectors.GetOrAdd(entry.Target.Endpoint, KindOrNull(entry), modelId);
         _vm.Bind(collector, entry);
         Persisted.BackendId = entry.Target.GroupKey;
         _manager.QueueSave();
     }
+
 
     private static Core.BackendKind? KindOrNull(BackendRegistry.TargetEntry e) =>
         e.Target.Kind == Core.BackendKind.Unknown ? null : e.Target.Kind;

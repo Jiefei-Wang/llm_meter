@@ -28,28 +28,50 @@ public sealed class ManualEndpointConfig
 /// </summary>
 public static class CredentialProtection
 {
-    public static string? Protect(string? plainText)
+    public static bool TryProtect(string? plainText, out string? protectedText)
     {
-        if (string.IsNullOrWhiteSpace(plainText)) return null;
-        if (!OperatingSystem.IsWindows()) return plainText.Trim();
+        if (string.IsNullOrWhiteSpace(plainText))
+        {
+            protectedText = null;
+            return true;
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            protectedText = plainText.Trim();
+            return true;
+        }
+
         try
         {
             var bytes = System.Text.Encoding.UTF8.GetBytes(plainText.Trim());
             var enc = System.Security.Cryptography.ProtectedData.Protect(
                 bytes, null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
-            return "enc:" + Convert.ToBase64String(enc);
+            protectedText = "enc:" + Convert.ToBase64String(enc);
+            return true;
         }
         catch
         {
-            return plainText.Trim();
+            protectedText = null;
+            return false;
         }
+    }
+
+    public static string? Protect(string? plainText)
+    {
+        if (string.IsNullOrWhiteSpace(plainText)) return null;
+        if (!TryProtect(plainText, out var protectedText))
+        {
+            throw new System.Security.Cryptography.CryptographicException("Could not securely store API token");
+        }
+        return protectedText;
     }
 
     public static string? Unprotect(string? stored)
     {
         if (string.IsNullOrWhiteSpace(stored)) return null;
         if (!stored.StartsWith("enc:", StringComparison.Ordinal) || !OperatingSystem.IsWindows())
-            return stored; // plaintext fallback or non-Windows
+            return stored; // plaintext fallback for legacy configs or non-Windows
         try
         {
             var bytes = Convert.FromBase64String(stored[4..]);
@@ -63,6 +85,7 @@ public static class CredentialProtection
         }
     }
 }
+
 
 public sealed class WindowConfig
 {
@@ -186,12 +209,24 @@ public sealed class ConfigurationService
 
     internal static void Normalize(AppConfiguration cfg)
     {
-            // Old/unknown versions: keep what we can parse, reset version marker.
-            cfg.Version = AppConfiguration.CurrentVersion;
+        // Old/unknown versions: keep what we can parse, reset version marker.
+        cfg.Version = AppConfiguration.CurrentVersion;
         cfg.ManualBackends ??= [];
         cfg.Windows ??= [];
         cfg.Discovery ??= new DiscoveryConfig();
         cfg.Discovery.KnownPorts ??= [8000, 8080, 1234, 11434];
+
+        // Migrate any unencrypted plaintext API keys
+        foreach (var m in cfg.ManualBackends)
+        {
+            if (!string.IsNullOrWhiteSpace(m.ApiKey) && !m.ApiKey.StartsWith("enc:", StringComparison.Ordinal))
+            {
+                if (CredentialProtection.TryProtect(m.ApiKey, out var encrypted))
+                {
+                    m.ApiKey = encrypted;
+                }
+            }
+        }
     }
 
     /// <summary>Atomic save: temp file + flush + replace.</summary>
@@ -202,7 +237,9 @@ public sealed class ConfigurationService
 
     private void SaveCore(AppConfiguration cfg)
     {
+        Normalize(cfg);
         var dir = Path.GetDirectoryName(ConfigPath);
+
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
         var tmp = ConfigPath + ".tmp";

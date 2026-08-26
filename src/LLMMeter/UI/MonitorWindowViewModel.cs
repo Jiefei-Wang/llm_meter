@@ -268,12 +268,14 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged, IDisposable
     private void UpdateHeader(string? modelName)
     {
         if (_entry is not { } entry) return;
-        string name = modelName is { Length: > 0 }
-            ? $"{entry.Target.Kind.DisplayName()} · {modelName}"
+        string? effectiveModel = !string.IsNullOrEmpty(entry.Target.ModelId) ? entry.Target.ModelId : modelName;
+        string name = effectiveModel is { Length: > 0 }
+            ? $"{entry.Target.Kind.DisplayName()} · {effectiveModel}"
             : entry.Target.DisplayName;
         HeaderText = name.Length > 42 ? name[..41].TrimEnd() + "…" : name;
         SubtitleText = MonitorWindow.DescribeOrigin(entry);
     }
+
 
     private void ResetMetrics()
     {

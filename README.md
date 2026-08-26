@@ -21,11 +21,15 @@ LLM Meter is a lightweight Windows tray widget for watching local LLM inference 
 | --- | --- | --- |
 | llama.cpp / llama-server | `/metrics` with `llamacpp:*` or `/slots` | Prometheus metrics, `/slots`, and `/props` |
 | vLLM | `/metrics` with `vllm:*` | Prometheus counters, gauges, and histograms |
-| LM Studio | `/api/v0/models` | Native REST API with v1 fallback |
+| LM Studio | `/api/v1/models` (fallback `/api/v0/models`) | Native REST API loaded instances |
 | Ollama | `/api/version`, `/api/ps`, `/api/tags` | Native REST API |
+| NInfer | Process `ninfer-serve`, telemetry file, or manual | Native `--request-log-jsonl` (Full) or HTTP `/health` (Limited) |
 | Generic OpenAI-compatible | `/v1/models` response shape | Connectivity and model information only |
 
-For full llama-server telemetry, start it with `--metrics`. The `/slots` endpoint supplies active-request details and is enabled by default in current llama.cpp releases.
+For full llama-server telemetry, start it with `--metrics`. The `/slots` endpoint supplies active-request details and is enabled by default in current llama.cpp releases. When monitoring llama-server in router mode, LLMMeter queries loaded models with `autoload=false` to prevent passive polling from triggering model loading.
+
+For full NInfer telemetry, run `ninfer-serve` with `--request-log-jsonl /tmp/llmmeter/ninfer-<port>.requests.jsonl` (or `%TEMP%\LLMMeter\ninfer-<port>.requests.jsonl` on Windows). When running in WSL, LLMMeter automatically translates the Linux path and reads the telemetry log over `\\wsl.localhost\<distro>\...`. Without the log file, LLMMeter runs in Limited mode, tracking server online status and model catalogs honestly without fabricating throughput or queues.
+
 
 ## Install
 

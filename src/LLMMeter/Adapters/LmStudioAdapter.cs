@@ -5,8 +5,8 @@ namespace LLMMeter.Adapters;
 
 /// <summary>
 /// LM Studio adapter. Identifies the server and lists loaded models via the
-/// official REST API (/api/v0/models, fallback /api/v1/models). Passive
-/// server-wide runtime telemetry is not exposed by current APIs — those
+/// official REST API: /api/v1/models (primary) and /api/v0/models (fallback).
+/// Passive server-wide runtime telemetry is not exposed by current APIs — those
 /// metrics stay honestly unavailable.
 /// </summary>
 public sealed class LmStudioAdapter : IBackendAdapter
@@ -15,10 +15,8 @@ public sealed class LmStudioAdapter : IBackendAdapter
 
     public BackendCapabilities Capabilities => BackendCapabilities.None;
 
-    private string? _serverVersion;
-    private bool _serverVersionProbeAttempted;
-
     public async Task<FingerprintResult?> IdentifyAsync(IHttp http, CancellationToken ct)
+
     {
         var v1 = await http.GetJsonAsync("api/v1/models", ct).ConfigureAwait(false);
         if (v1.HasValue && LooksLikeNativeV1(v1.Value))
@@ -79,15 +77,6 @@ public sealed class LmStudioAdapter : IBackendAdapter
 
     public async Task<MetricSnapshot> CollectAsync(IHttp http, CancellationToken ct)
     {
-        if (!_serverVersionProbeAttempted)
-        {
-            _serverVersionProbeAttempted = true;
-            var status = await http.GetJsonAsync("api/v0/status", ct).ConfigureAwait(false);
-            if (status.HasValue && status.Value.ValueKind == JsonValueKind.Object &&
-                status.Value.TryGetProperty("version", out var ver) && ver.ValueKind == JsonValueKind.String)
-                _serverVersion = ver.GetString();
-        }
-
         var info = new Dictionary<string, string>();
         var models = await http.GetJsonAsync("api/v1/models", ct).ConfigureAwait(false);
 
@@ -140,7 +129,6 @@ public sealed class LmStudioAdapter : IBackendAdapter
         }
 
         info["API"] = isV1 ? "REST API v1" : "REST API v0";
-        if (_serverVersion is { } sv) info["Server"] = sv;
 
         return new MetricSnapshot
         {
@@ -165,6 +153,6 @@ public sealed class LmStudioAdapter : IBackendAdapter
         ["Server status", "Loaded model discovery", "Model metadata"],
         ["Running requests", "Queue", "Prefill throughput", "Generation throughput", "KV usage", "Per-request details"],
         null,
-        $"LM Studio's local REST API does not expose passive server-wide runtime metrics{_serverVersion,0}. " +
+        "LM Studio's local REST API does not expose passive server-wide runtime metrics. " +
         "These values are shown as unavailable rather than estimated.");
 }

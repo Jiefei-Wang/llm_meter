@@ -17,7 +17,13 @@ public sealed class CollectorManager : IDisposable
         lock (_lock)
         {
             if (_collectors.TryGetValue(key, out var existing))
+            {
+                if (!string.Equals(existing.Endpoint.AuthToken, endpoint.AuthToken, StringComparison.Ordinal))
+                {
+                    existing.Reconfigure(endpoint);
+                }
                 return existing;
+            }
 
             var collector = new BackendCollector(endpoint, knownKind, modelId);
             _collectors[key] = collector;
@@ -61,23 +67,27 @@ public sealed class CollectorManager : IDisposable
     /// <summary>Drop collectors that no longer have any observers and are offline.</summary>
     public void Prune(Func<BackendCollector, bool>? keepIf)
     {
+        List<string> keysToRemove = [];
         List<BackendCollector> removed = [];
         lock (_lock)
         {
-            foreach (var key in _collectors.Keys.ToList())
+            foreach (var kvp in _collectors)
             {
-                var c = _collectors[key];
-                if (keepIf?.Invoke(c) == false)
-                    removed.Add(c);
+                if (keepIf?.Invoke(kvp.Value) == false)
+                {
+                    keysToRemove.Add(kvp.Key);
+                    removed.Add(kvp.Value);
+                }
             }
-            foreach (var c in removed)
-                _collectors.Remove(CollectorKey(c.Endpoint));
+            foreach (var key in keysToRemove)
+                _collectors.Remove(key);
         }
         foreach (var c in removed)
         {
             c.Dispose();
         }
     }
+
 
     public int Count
     {

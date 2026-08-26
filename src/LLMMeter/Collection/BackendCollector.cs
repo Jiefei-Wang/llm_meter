@@ -15,7 +15,7 @@ public sealed class BackendCollector : IDisposable
     private static readonly TimeSpan PollTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan[] BackoffSchedule = [TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(10)];
 
-    private readonly EndpointRef _endpoint;
+    private EndpointRef _endpoint;
     private readonly Func<BackendKind, IBackendAdapter> _adapterFactory;
     private readonly HttpClient _client;
     private readonly CancellationTokenSource _cts = new();
@@ -30,8 +30,9 @@ public sealed class BackendCollector : IDisposable
     public event Action<MetricSnapshot>? SnapshotUpdated;
 
     public BackendCollector(EndpointRef endpoint, BackendKind? knownKind, string? modelId = null)
-        : this(endpoint, knownKind, kind => CreateAdapter(kind, modelId), endpoint.AuthToken)
+        : this(endpoint, knownKind, kind => CreateAdapter(kind, endpoint, modelId), endpoint.AuthToken)
     {
+        ModelId = modelId;
     }
 
     internal BackendCollector(EndpointRef endpoint, BackendKind? knownKind,
@@ -45,24 +46,42 @@ public sealed class BackendCollector : IDisposable
     }
 
     public EndpointRef Endpoint => _endpoint;
+    public string? ModelId { get; }
     public BackendKind? KnownKind { get; private set; }
     public MetricSnapshot? Latest => Volatile.Read(ref _latest);
     public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
-    private static IBackendAdapter CreateAdapter(BackendKind kind, string? modelId = null) => kind switch
+
+    public void Reconfigure(EndpointRef endpoint)
+    {
+        _endpoint = endpoint;
+        if (!string.IsNullOrWhiteSpace(endpoint.AuthToken))
+        {
+            _client.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", endpoint.AuthToken.Trim());
+        }
+        else
+        {
+            _client.DefaultRequestHeaders.Authorization = null;
+        }
+    }
+
+    private static IBackendAdapter CreateAdapter(BackendKind kind, EndpointRef endpoint, string? modelId = null) => kind switch
     {
         BackendKind.Vllm => new VllmAdapter(),
         BackendKind.LlamaCpp => new LlamaCppAdapter(modelId),
         BackendKind.LmStudio => new LmStudioAdapter(),
         BackendKind.Ollama => new OllamaAdapter(),
         BackendKind.GenericOpenAi => new GenericOpenAiAdapter(),
+        BackendKind.NInfer => new NInferAdapter(endpoint),
         _ => throw new ArgumentOutOfRangeException(nameof(kind)),
     };
 
-    /// <summary>Llama adapter command-line injection point (help popup).</summary>
+    /// <summary>Llama / NInfer adapter command-line injection point (help popup).</summary>
     public void SetCurrentCommand(string cmd)
     {
         if (_adapter is LlamaCppAdapter l) l.SetCurrentCommand(cmd);
+        else if (_adapter is NInferAdapter n) n.SetCurrentCommand(cmd);
     }
 
     public TelemetryHelp? GetHelp() => _adapter?.GetHelp();
@@ -74,13 +93,16 @@ public sealed class BackendCollector : IDisposable
     private async Task PollLoopAsync(CancellationToken ct)
     {
         // If kind unknown (shouldn't happen — registry fingerprints first), try to detect.
+        // Use the collector's authenticated client to preserve any configured Bearer token.
         if (KnownKind is null or BackendKind.Unknown)
         {
-            var fp = await new Discovery.EndpointFingerprinter()
+            using var probeHttp = new PollHttp(_client, _endpoint.BaseUrl, PollTimeout);
+            var fp = await new Discovery.EndpointFingerprinter(_ => probeHttp)
                 .FingerprintAsync(_endpoint.BaseUrl, ct).ConfigureAwait(false);
             if (fp.Kind == BackendKind.Unknown && ct.IsCancellationRequested) return;
             KnownKind = fp.Kind == BackendKind.Unknown ? BackendKind.GenericOpenAi : fp.Kind;
         }
+
 
         _adapter ??= _adapterFactory(KnownKind.Value);
 
@@ -147,9 +169,11 @@ public sealed class BackendCollector : IDisposable
 
         void Cleanup()
         {
+            if (_adapter is IDisposable d) d.Dispose();
             _client.Dispose();
             _cts.Dispose();
         }
+
     }
 
     /// <summary>Non-owning IHttp over the collector's shared client.</summary>

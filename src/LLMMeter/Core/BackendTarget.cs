@@ -54,6 +54,7 @@ public enum BackendKind
     LmStudio,
     Ollama,
     GenericOpenAi,
+    NInfer,
 }
 
 public static class BackendKindExtensions
@@ -65,6 +66,7 @@ public static class BackendKindExtensions
         BackendKind.LmStudio => "LM Studio",
         BackendKind.Ollama => "Ollama",
         BackendKind.GenericOpenAi => "OpenAI-compatible",
+        BackendKind.NInfer => "NInfer",
         _ => "Unknown",
     };
 }
@@ -77,8 +79,14 @@ public sealed record BackendTarget(
     string Id,
     EndpointRef Endpoint,
     BackendKind Kind,
-    string? ModelId,        // model-scoped target when supported (LM Studio)
+    string? ModelId,        // model-scoped target when supported (llama-server router)
     string DisplayName)
 {
-    public string GroupKey => $"{Endpoint.Id}|{ModelId ?? "*"}";
+    public string GroupKey => $"{Endpoint.Id}|{(RequiresModelScopedCollector ? ModelId : "*")}";
+
+    /// <summary>
+    /// True only for backends that genuinely require a model-scoped collector instance (currently llama-server router).
+    /// LM Studio and other multi-model backends use endpoint-level collectors.
+    /// </summary>
+    public bool RequiresModelScopedCollector => Kind == BackendKind.LlamaCpp && !string.IsNullOrEmpty(ModelId);
 }

@@ -63,7 +63,8 @@ public sealed class LlamaCppAdapter : IBackendAdapter
     {
         if (string.IsNullOrEmpty(_modelId))
             return baseEndpoint;
-        return $"{baseEndpoint}?model={Uri.EscapeDataString(_modelId)}";
+        string separator = baseEndpoint.Contains('?') ? "&" : "?";
+        return $"{baseEndpoint}{separator}model={Uri.EscapeDataString(_modelId)}&autoload=false";
     }
 
     public BackendCapabilities Capabilities =>
@@ -110,42 +111,50 @@ public sealed class LlamaCppAdapter : IBackendAdapter
 
     private async Task<FingerprintResult?> IdentifyRouterAsync(IHttp http, CancellationToken ct)
     {
-        var models = await EnumerateModelsAsync(http, ct).ConfigureAwait(false);
-        if (models.Count == 0) return null;
+        // 1. Upstream /props returns role: "router" (case-insensitive) in router mode.
+        // This detects router mode even when 0 models are loaded/configured.
+        var props = await http.GetJsonAsync("props", ct).ConfigureAwait(false);
+        if (props.HasValue && props.Value.ValueKind == JsonValueKind.Object)
+        {
+            if (props.Value.TryGetProperty("role", out var roleEl) && roleEl.ValueKind == JsonValueKind.String &&
+                roleEl.GetString()?.Equals("router", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                return new FingerprintResult(Kind, "llama-server router mode (/props role=router)");
+            }
+        }
 
-        string firstModel = models[0];
-        string probePath = $"metrics?model={Uri.EscapeDataString(firstModel)}";
-        var (status, body) = await http.GetStringAsync(probePath, ct).ConfigureAwait(false);
-        if (status == 200 && body.Contains("llamacpp:", StringComparison.Ordinal))
-            return new FingerprintResult(Kind, $"llama-server router mode ({models.Count} models)");
+        // 2. Query catalog of models
+        var allModels = await EnumerateModelsDetailedAsync(http, ct).ConfigureAwait(false);
+        var loadedModels = allModels.Where(m => m.Status.Equals("loaded", StringComparison.OrdinalIgnoreCase)).ToList();
 
-        var slots = await http.GetJsonAsync($"slots?model={Uri.EscapeDataString(firstModel)}", ct).ConfigureAwait(false);
-        if (slots.HasValue && LooksLikeSlots(slots.Value))
-            return new FingerprintResult(Kind, $"llama-server router mode via /slots ({models.Count} models)");
+        // Only probe a model if it is already loaded; never probe unloaded models to avoid autoloading.
+        if (loadedModels.Count > 0)
+        {
+            string firstModel = loadedModels[0].Id;
+            string probePath = $"metrics?model={Uri.EscapeDataString(firstModel)}&autoload=false";
+            var (status, body) = await http.GetStringAsync(probePath, ct).ConfigureAwait(false);
+            if (status == 200 && body.Contains("llamacpp:", StringComparison.Ordinal))
+                return new FingerprintResult(Kind, $"llama-server router mode ({allModels.Count} models)");
 
-        var props = await http.GetJsonAsync($"props?model={Uri.EscapeDataString(firstModel)}", ct).ConfigureAwait(false);
-        if (props.HasValue && (props.Value.TryGetProperty("total_slots", out _) || props.Value.TryGetProperty("model_path", out _)))
-            return new FingerprintResult(Kind, $"llama-server router mode via /props ({models.Count} models)");
+            var slots = await http.GetJsonAsync($"slots?model={Uri.EscapeDataString(firstModel)}&autoload=false", ct).ConfigureAwait(false);
+            if (slots.HasValue && LooksLikeSlots(slots.Value))
+                return new FingerprintResult(Kind, $"llama-server router mode via /slots ({allModels.Count} models)");
+
+            var modelProps = await http.GetJsonAsync($"props?model={Uri.EscapeDataString(firstModel)}&autoload=false", ct).ConfigureAwait(false);
+            if (modelProps.HasValue && (modelProps.Value.TryGetProperty("total_slots", out _) || modelProps.Value.TryGetProperty("model_path", out _)))
+                return new FingerprintResult(Kind, $"llama-server router mode via /props ({allModels.Count} models)");
+        }
 
         return null;
     }
 
-    internal static async Task<List<string>> EnumerateModelsAsync(IHttp http, CancellationToken ct)
-    {
-        var list = new List<string>();
-        var v1 = await http.GetJsonAsync("v1/models", ct).ConfigureAwait(false);
-        if (v1.HasValue && v1.Value.ValueKind == JsonValueKind.Object &&
-            v1.Value.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var item in data.EnumerateArray())
-            {
-                if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("id", out var id) &&
-                    id.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(id.GetString()))
-                    list.Add(id.GetString()!);
-            }
-        }
-        if (list.Count > 0) return list;
 
+    private List<LlamaRouterModel> _cachedRouterModels = [];
+    private long _lastModelsProbeTicks;
+
+    internal static async Task<List<LlamaRouterModel>> EnumerateModelsDetailedAsync(IHttp http, CancellationToken ct)
+    {
+        var list = new List<LlamaRouterModel>();
         var models = await http.GetJsonAsync("models", ct).ConfigureAwait(false);
         if (models.HasValue)
         {
@@ -155,9 +164,15 @@ public sealed class LlamaCppAdapter : IBackendAdapter
                 {
                     if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("id", out var id) &&
                         id.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(id.GetString()))
-                        list.Add(id.GetString()!);
+                    {
+                        string status = item.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.String
+                            ? st.GetString() ?? "loaded" : "loaded";
+                        list.Add(new LlamaRouterModel(id.GetString()!, status));
+                    }
                     else if (item.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(item.GetString()))
-                        list.Add(item.GetString()!);
+                    {
+                        list.Add(new LlamaRouterModel(item.GetString()!, "loaded"));
+                    }
                 }
             }
             else if (models.Value.ValueKind == JsonValueKind.Object &&
@@ -165,13 +180,49 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             {
                 foreach (var item in inner.EnumerateArray())
                 {
-                    if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("name", out var name) &&
-                        name.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(name.GetString()))
-                        list.Add(name.GetString()!);
+                    if (item.ValueKind == JsonValueKind.Object)
+                    {
+                        string? name = item.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() : null;
+                        name ??= item.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;
+                        if (!string.IsNullOrWhiteSpace(name))
+                        {
+                            string status = item.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.String
+                                ? st.GetString() ?? "loaded" : "loaded";
+                            list.Add(new LlamaRouterModel(name, status));
+                        }
+                    }
                 }
             }
         }
+
+        if (list.Count > 0) return list;
+
+        var v1 = await http.GetJsonAsync("v1/models", ct).ConfigureAwait(false);
+        if (v1.HasValue && v1.Value.ValueKind == JsonValueKind.Object &&
+            v1.Value.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in data.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("id", out var id) &&
+                    id.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(id.GetString()))
+                {
+                    string status = item.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.String
+                        ? st.GetString() ?? "loaded" : "loaded";
+                    list.Add(new LlamaRouterModel(id.GetString()!, status));
+                }
+            }
+        }
+
         return list;
+    }
+
+    internal static async Task<List<string>> EnumerateModelsAsync(IHttp http, CancellationToken ct)
+    {
+        var detailed = await EnumerateModelsDetailedAsync(http, ct).ConfigureAwait(false);
+        return detailed
+            .Where(m => m.Status.Equals("loaded", StringComparison.OrdinalIgnoreCase))
+            .Select(m => m.Id)
+            .ToList();
     }
 
     internal static bool LooksLikeSlots(JsonElement el)
@@ -194,6 +245,7 @@ public sealed class LlamaCppAdapter : IBackendAdapter
         var info = new Dictionary<string, string>();
 
         // --- /props occasionally for metadata
+        bool isRouter = false;
         if ((_modelPath is null || _totalSlots is null) &&
             (_lastPropsAttemptTicks == 0 || now - _lastPropsAttemptTicks >= Stopwatch.Frequency * 5))
         {
@@ -201,6 +253,11 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             var props = await http.GetJsonAsync(EndpointPath("props"), ct).ConfigureAwait(false);
             if (props.HasValue && props.Value.ValueKind == JsonValueKind.Object)
             {
+                if (props.Value.TryGetProperty("role", out var roleEl) && roleEl.ValueKind == JsonValueKind.String &&
+                    roleEl.GetString()?.Equals("router", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    isRouter = true;
+                }
                 if (props.Value.TryGetProperty("total_slots", out var ts) && ts.ValueKind == JsonValueKind.Number)
                     _totalSlots = ts.GetInt32();
                 if (props.Value.TryGetProperty("model_path", out var mp) && mp.ValueKind == JsonValueKind.String &&
@@ -239,14 +296,25 @@ public sealed class LlamaCppAdapter : IBackendAdapter
         // Check for router mode when not already scoped to a specific model
         if (string.IsNullOrEmpty(_modelId))
         {
-            var routerModels = await EnumerateModelsAsync(http, ct).ConfigureAwait(false);
-            if (routerModels.Count > 0)
+            if (_lastModelsProbeTicks == 0 || now - _lastModelsProbeTicks >= Stopwatch.Frequency * 5)
             {
-                info["Mode"] = $"router mode ({routerModels.Count} models)";
+                _lastModelsProbeTicks = now;
+                _cachedRouterModels = await EnumerateModelsDetailedAsync(http, ct).ConfigureAwait(false);
+            }
+
+            var loadedModels = _cachedRouterModels
+                .Where(m => m.Status.Equals("loaded", StringComparison.OrdinalIgnoreCase))
+                .Select(m => m.Id)
+                .ToList();
+
+            if (isRouter || _cachedRouterModels.Count > 0)
+            {
+                info["Router"] = "true";
+                info["Mode"] = $"router mode ({loadedModels.Count} loaded, {_cachedRouterModels.Count} total)";
                 return new MetricSnapshot
                 {
                     Timestamp = DateTimeOffset.Now,
-                    State = ConnectionState.Online,
+                    State = loadedModels.Count > 0 ? ConnectionState.Online : ConnectionState.Limited,
                     Kind = Kind,
                     Running = MetricValue<int>.None,
                     Queued = MetricValue<int>.None,
@@ -255,12 +323,13 @@ public sealed class LlamaCppAdapter : IBackendAdapter
                     KvCacheUsage = MetricValue<double>.None,
                     RecentTtftMs = MetricValue<double>.None,
                     Requests = null,
-                    ModelName = _modelPath ?? routerModels[0],
-                    LoadedModels = routerModels,
+                    ModelName = _modelPath ?? (loadedModels.Count > 0 ? loadedModels[0] : (_cachedRouterModels.Count > 0 ? _cachedRouterModels[0].Id : "router")),
+                    LoadedModels = loadedModels,
                     Info = info,
                 };
             }
         }
+
 
         // --- /slots fallback
         _metricsEnabled = false;
@@ -631,3 +700,5 @@ public sealed class LlamaCppAdapter : IBackendAdapter
     /// <summary>Set by discovery when the local process command line was recovered.</summary>
     public void SetCurrentCommand(string cmd) => _currentCommand = cmd;
 }
+
+public sealed record LlamaRouterModel(string Id, string Status);

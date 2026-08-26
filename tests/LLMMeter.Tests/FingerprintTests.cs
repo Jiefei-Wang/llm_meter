@@ -475,12 +475,13 @@ public class FingerprintTests
     {
         var routes = new Dictionary<string, (int, string)>
         {
+            ["props"] = (200, """{"role":"router"}"""),
             ["metrics"] = (400, "model is required in router mode"),
             ["slots"] = (400, "model is required"),
             ["v1/models"] = (200, """{"object":"list","data":[{"id":"qwen-7b"},{"id":"deepseek-7b"}]}"""),
-            ["metrics?model=qwen-7b"] = (200, "llamacpp:prompt_tokens_total 100\n"),
-            ["slots?model=qwen-7b"] = (200, "[]"),
-            ["props?model=qwen-7b"] = (200, """{"total_slots":2,"model_path":"/models/qwen.gguf"}"""),
+            ["metrics?model=qwen-7b&autoload=false"] = (200, "llamacpp:prompt_tokens_total 100\n"),
+            ["slots?model=qwen-7b&autoload=false"] = (200, "[]"),
+            ["props?model=qwen-7b&autoload=false"] = (200, """{"total_slots":2,"model_path":"/models/qwen.gguf"}"""),
         };
         var http = new FakeHttp(new Uri("http://x/"), routes);
 
@@ -488,14 +489,15 @@ public class FingerprintTests
         Assert.Equal(BackendKind.LlamaCpp, fp.Kind);
         Assert.Contains("router mode", fp.Evidence);
 
-        // Model-scoped adapter queries model-specific endpoints
+        // Model-scoped adapter queries model-specific endpoints with autoload=false
         var scopedAdapter = new LlamaCppAdapter("qwen-7b");
         var snap = await scopedAdapter.CollectAsync(http, default);
         Assert.NotEqual(ConnectionState.Offline, snap.State);
         Assert.Equal("qwen.gguf", snap.ModelName);
-        Assert.Contains("metrics?model=qwen-7b", http.Requests);
-        Assert.Contains("slots?model=qwen-7b", http.Requests);
+        Assert.Contains("metrics?model=qwen-7b&autoload=false", http.Requests);
+        Assert.Contains("slots?model=qwen-7b&autoload=false", http.Requests);
     }
+
 
     [Fact]
     public async Task Vllm_Aggregates_Multi_Engine_Gauges_And_Counters()
@@ -625,7 +627,7 @@ public class FingerprintTests
     }
 
     [Fact]
-    public async Task LmStudio_Missing_Status_Endpoint_Not_Hit_Every_Poll()
+    public async Task LmStudio_Status_Endpoint_Is_Never_Hit()
     {
         var routes = new Dictionary<string, (int, string)>
         {
@@ -636,12 +638,13 @@ public class FingerprintTests
         var adapter = new LmStudioAdapter();
 
         await adapter.CollectAsync(http, default);
-        Assert.Equal(1, http.Requests.Count(r => r == "api/v0/status"));
+        // api/v0/status probe was removed (spec Part E1) and must never be queried
+        Assert.Equal(0, http.Requests.Count(r => r == "api/v0/status"));
 
         await adapter.CollectAsync(http, default);
-        // Second poll must NOT query api/v0/status again
-        Assert.Equal(1, http.Requests.Count(r => r == "api/v0/status"));
+        Assert.Equal(0, http.Requests.Count(r => r == "api/v0/status"));
     }
+
 
     [Fact]
     public async Task Bearer_Authentication_Attached_When_Configured_And_Absent_Otherwise()

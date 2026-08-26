@@ -24,13 +24,18 @@ public sealed class EndpointFingerprinter
             new LlamaCppAdapter(),
             new LmStudioAdapter(),
             new OllamaAdapter(),
+            new NInferAdapter(),
         ];
     }
 
     /// <summary>Identify the endpoint kind. Returns GenericOpenAi or Unknown.</summary>
-    public async Task<FingerprintResult> FingerprintAsync(Uri baseUrl, CancellationToken ct)
+    public Task<FingerprintResult> FingerprintAsync(Uri baseUrl, CancellationToken ct) =>
+        FingerprintAsync(baseUrl, null, ct);
+
+    /// <summary>Identify the endpoint kind using optional Bearer authentication.</summary>
+    public async Task<FingerprintResult> FingerprintAsync(Uri baseUrl, string? authToken, CancellationToken ct)
     {
-        using var inner = _httpFactory?.Invoke(baseUrl) ?? HttpService.CreateOwning(baseUrl, ProbeTimeout);
+        using var inner = _httpFactory?.Invoke(baseUrl) ?? HttpService.CreateOwning(baseUrl, ProbeTimeout, authToken);
         using var http = new CachingHttp(inner);
         foreach (var adapter in _ordered)
         {
@@ -59,6 +64,7 @@ public sealed class EndpointFingerprinter
 
         return new FingerprintResult(BackendKind.Unknown, "no recognized endpoint schema");
     }
+
 
     /// <summary>One fingerprint pass asks several adapters about the same paths.</summary>
     private sealed class CachingHttp(IHttp inner) : IHttp

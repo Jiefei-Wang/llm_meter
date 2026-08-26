@@ -57,6 +57,7 @@ public sealed class BackendRegistry : IDisposable
         "lmstudio" => BackendKind.LmStudio,
         "ollama" => BackendKind.Ollama,
         "openai" => BackendKind.GenericOpenAi,
+        "ninfer" => BackendKind.NInfer,
         _ => BackendKind.Unknown,
     };
 
@@ -69,7 +70,7 @@ public sealed class BackendRegistry : IDisposable
         var kind = ParseKind(e.Type);
         if (kind == BackendKind.Unknown)
         {
-            var fp = await _fingerprinter.FingerprintAsync(uri, CancellationToken.None).ConfigureAwait(false);
+            var fp = await _fingerprinter.FingerprintAsync(uri, e.PlainTextApiKey, CancellationToken.None).ConfigureAwait(false);
             kind = fp.Kind == BackendKind.Unknown ? BackendKind.GenericOpenAi : fp.Kind;
         }
         lock (_lock) _manualKinds[e.Url] = kind;
@@ -183,6 +184,11 @@ public sealed class BackendRegistry : IDisposable
         string? ModelName,
         ConnectionState State);
 
+    private static bool IsRouterMode(BackendKind kind, MetricSnapshot? latest) =>
+        kind == BackendKind.LlamaCpp &&
+        latest?.Info.TryGetValue("Router", out var r) == true &&
+        string.Equals(r, "true", StringComparison.OrdinalIgnoreCase);
+
     /// <summary>Builds the dropdown model: entries grouped by origin with status.</summary>
     public List<TargetEntry> GetTargetEntries()
     {
@@ -195,18 +201,34 @@ public sealed class BackendRegistry : IDisposable
         {
             var collector = Collectors.GetOrAdd(s.Endpoint, s.Kind);
             var latest = collector.Latest;
-            if (latest?.LoadedModels is { Count: > 1 } models)
+            bool isRouter = IsRouterMode(s.Kind, latest);
+
+            if (isRouter)
             {
-                foreach (var model in models)
+                var loaded = latest?.LoadedModels ?? Array.Empty<string>();
+                if (loaded.Count == 0)
                 {
-                    string targetId = $"{s.Endpoint.Id}|{model}";
-                    string label = DescribeTarget(s.Kind, s.Endpoint, model);
+                    string label = DescribeTarget(s.Kind, s.Endpoint, "router (0 models)");
                     list.Add(new TargetEntry(
-                        new BackendTarget(targetId, s.Endpoint, s.Kind, model, label),
+                        new BackendTarget(s.Endpoint.Id, s.Endpoint, s.Kind, null, label),
                         group,
                         IsOnline(latest),
-                        model,
+                        "router",
                         latest?.State ?? ConnectionState.Connecting));
+                }
+                else
+                {
+                    foreach (var model in loaded)
+                    {
+                        string targetId = $"{s.Endpoint.Id}|{model}";
+                        string label = DescribeTarget(s.Kind, s.Endpoint, model);
+                        list.Add(new TargetEntry(
+                            new BackendTarget(targetId, s.Endpoint, s.Kind, model, label),
+                            group,
+                            IsOnline(latest),
+                            model,
+                            latest?.State ?? ConnectionState.Connecting));
+                    }
                 }
             }
             else
@@ -242,36 +264,53 @@ public sealed class BackendRegistry : IDisposable
             var endpoint = new EndpointRef(id, norm, OriginKind.Manual, null, m.PlainTextApiKey);
             var collector = Collectors.GetOrAdd(endpoint, LookupManualKind(m));
             var latest = collector.Latest;
+            var kind = collector.KnownKind ?? BackendKind.Unknown;
+            bool isRouter = IsRouterMode(kind, latest);
 
             string label = string.IsNullOrWhiteSpace(m.Name)
                 ? $"{norm.Host}:{norm.Port}"
                 : m.Name;
             if (!string.IsNullOrWhiteSpace(m.Name)) label += $"  ({norm.Host}:{norm.Port})";
 
-            if (latest?.LoadedModels is { Count: > 1 } models)
+            if (isRouter)
             {
-                foreach (var model in models)
+                var loaded = latest?.LoadedModels ?? Array.Empty<string>();
+                if (loaded.Count == 0)
                 {
-                    string targetId = $"{id}|{model}";
-                    string modelLabel = $"{label} · {model}";
+                    string routerLabel = $"{label} · router";
                     list.Add(new TargetEntry(
-                        new BackendTarget(targetId, endpoint, collector.KnownKind ?? BackendKind.Unknown, model, modelLabel),
+                        new BackendTarget(id, endpoint, kind, null, routerLabel),
                         "Manual",
                         IsOnline(latest),
-                        model,
+                        "router",
                         latest?.State ?? ConnectionState.Connecting));
+                }
+                else
+                {
+                    foreach (var model in loaded)
+                    {
+                        string targetId = $"{id}|{model}";
+                        string modelLabel = $"{label} · {model}";
+                        list.Add(new TargetEntry(
+                            new BackendTarget(targetId, endpoint, kind, model, modelLabel),
+                            "Manual",
+                            IsOnline(latest),
+                            model,
+                            latest?.State ?? ConnectionState.Connecting));
+                    }
                 }
             }
             else
             {
                 list.Add(new TargetEntry(
-                    new BackendTarget(id, endpoint, collector.KnownKind ?? BackendKind.Unknown, null, label),
+                    new BackendTarget(id, endpoint, kind, null, label),
                     "Manual",
                     IsOnline(latest),
                     latest?.ModelName,
                     latest?.State ?? ConnectionState.Connecting));
             }
         }
+
 
         return list;
     }
