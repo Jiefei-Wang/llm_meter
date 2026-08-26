@@ -86,6 +86,8 @@ public sealed class RollingTtft(int windowSize = 10)
         return wSum > 0 ? vSum / wSum : null;
     }
 
+    public int TotalSamples => (int)_entries.Sum(e => e.Weight);
+
     /// <summary>
     /// True when every contributing observation came from a single-request
     /// delta and enough requests were seen to fill the window.
@@ -96,7 +98,7 @@ public sealed class RollingTtft(int windowSize = 10)
         foreach (var e in _entries)
             if (e.Weight != 1) return false;
         double total = _entries.Sum(e => e.Weight);
-        return total >= Math.Min(2, _window); // need at least a couple of samples to be meaningful
+        return total >= _window;
     }
 
     public int SampleCount => _entries.Count;

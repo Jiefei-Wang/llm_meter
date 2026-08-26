@@ -16,16 +16,18 @@ public sealed class LmStudioAdapter : IBackendAdapter
     public BackendCapabilities Capabilities => BackendCapabilities.None;
 
     private string? _serverVersion;
+    private bool _serverVersionProbeAttempted;
 
     public async Task<FingerprintResult?> IdentifyAsync(IHttp http, CancellationToken ct)
     {
+        var v1 = await http.GetJsonAsync("api/v1/models", ct).ConfigureAwait(false);
+        if (v1.HasValue && LooksLikeNativeV1(v1.Value))
+            return new FingerprintResult(Kind, "/api/v1/models responds with list schema");
+
         var v0 = await http.GetJsonAsync("api/v0/models", ct).ConfigureAwait(false);
         if (v0.HasValue && LooksLikeLmStudio(v0.Value))
             return new FingerprintResult(Kind, "/api/v0/models matches LM Studio schema");
 
-        var v1 = await http.GetJsonAsync("api/v1/models", ct).ConfigureAwait(false);
-        if (v1.HasValue && LooksLikeNativeV1(v1.Value))
-            return new FingerprintResult(Kind, "/api/v1/models responds with list schema");
         return null;
     }
 
@@ -77,8 +79,9 @@ public sealed class LmStudioAdapter : IBackendAdapter
 
     public async Task<MetricSnapshot> CollectAsync(IHttp http, CancellationToken ct)
     {
-        if (_serverVersion is null)
+        if (!_serverVersionProbeAttempted)
         {
+            _serverVersionProbeAttempted = true;
             var status = await http.GetJsonAsync("api/v0/status", ct).ConfigureAwait(false);
             if (status.HasValue && status.Value.ValueKind == JsonValueKind.Object &&
                 status.Value.TryGetProperty("version", out var ver) && ver.ValueKind == JsonValueKind.String)
@@ -86,15 +89,15 @@ public sealed class LmStudioAdapter : IBackendAdapter
         }
 
         var info = new Dictionary<string, string>();
-        var models = await http.GetJsonAsync("api/v0/models", ct).ConfigureAwait(false);
+        var models = await http.GetJsonAsync("api/v1/models", ct).ConfigureAwait(false);
 
-        bool isV0 = models.HasValue && LooksLikeLmStudio(models.Value);
-        bool isV1 = false;
-        if (!isV0)
+        bool isV1 = models.HasValue && LooksLikeNativeV1(models.Value);
+        bool isV0 = false;
+        if (!isV1)
         {
-            models = await http.GetJsonAsync("api/v1/models", ct).ConfigureAwait(false);
-            isV1 = models.HasValue && LooksLikeNativeV1(models.Value);
-            if (!isV1)
+            models = await http.GetJsonAsync("api/v0/models", ct).ConfigureAwait(false);
+            isV0 = models.HasValue && LooksLikeLmStudio(models.Value);
+            if (!isV0)
                 return MetricSnapshot.Offline(Kind);
         }
 
@@ -132,7 +135,7 @@ public sealed class LmStudioAdapter : IBackendAdapter
                     firstLoadedId ??= id;
                 }
                 if (state == "loaded" && m.TryGetProperty("max_context_length", out var mcl) && mcl.ValueKind == JsonValueKind.Number)
-                    info[$"{id} ctx"] = $"{mcl.GetInt64():0}";
+                    info[$"{id} max ctx"] = $"{mcl.GetInt64():0}";
             }
         }
 

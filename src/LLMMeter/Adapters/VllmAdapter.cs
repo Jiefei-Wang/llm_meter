@@ -63,11 +63,15 @@ public sealed class VllmAdapter : IBackendAdapter
             return null;
         }
 
-        double? First(string[] names)
+        double? Average(string[] names)
         {
             foreach (var n in names)
+            {
+                double sum = 0; int count = 0;
                 foreach (var s in samples)
-                    if (s.Name == n) return s.Value;
+                    if (s.Name == n) { sum += s.Value; count++; }
+                if (count > 0) return sum / count;
+            }
             return null;
         }
 
@@ -76,9 +80,9 @@ public sealed class VllmAdapter : IBackendAdapter
 
         var now = MonoClock.NowTicks;
 
-        var runningV = First(RunningNames);
-        var waitingV = First(WaitingNames);
-        var kvV = First(KvUsageNames);
+        var runningV = Sum(RunningNames);
+        var waitingV = Sum(WaitingNames);
+        var kvV = Average(KvUsageNames);
         var prefillC = Sum(PrefillCounterNames);
         var genC = Sum(GenCounterNames);
 
@@ -103,7 +107,10 @@ public sealed class VllmAdapter : IBackendAdapter
         MetricValue<double> ttft = ttftAvg.HasValue
             ? (_ttft.IsExactEstimate()
                 ? MetricValue<double>.Exact(ttftAvg.Value * 1000.0, MetricSource.Derived, "rolling last-10 from TTFT histogram deltas")
-                : MetricValue<double>.Approx(ttftAvg.Value * 1000.0, MetricSource.Derived, "rolling estimate from TTFT histogram deltas"))
+                : MetricValue<double>.Approx(ttftAvg.Value * 1000.0, MetricSource.Derived,
+                    _ttft.TotalSamples < 10
+                        ? $"rolling estimate ({_ttft.TotalSamples} requests) from TTFT histogram deltas"
+                        : "rolling estimate from TTFT histogram deltas"))
             : MetricValue<double>.None;
 
         var state = ComputeState(running, queued, prefillRate, genRate, kv, ttft);

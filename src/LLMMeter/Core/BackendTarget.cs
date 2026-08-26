@@ -29,9 +29,21 @@ public sealed record EndpointRef(
     string Id,              // stable identity: origin|host|port
     Uri BaseUrl,
     OriginKind Origin,
-    string? WslDistro)      // non-null when Origin == Wsl
+    string? WslDistro,      // non-null when Origin == Wsl
+    string? AuthToken = null)
 {
     public string HostPort => BaseUrl.IsDefaultPort ? BaseUrl.Authority : $"{BaseUrl.Host}:{BaseUrl.Port}";
+
+    public string DedupeKey => NormalizeEndpointKey(BaseUrl);
+
+    public static string NormalizeEndpointKey(Uri url)
+    {
+        string host = url.Host.ToLowerInvariant();
+        if (host is "localhost" or "::1") host = "127.0.0.1";
+        int port = url.IsDefaultPort ? (url.Scheme == "https" ? 443 : 80) : url.Port;
+        string path = url.AbsolutePath.TrimEnd('/');
+        return $"{url.Scheme.ToLowerInvariant()}://{host}:{port}{path}";
+    }
 }
 
 public enum BackendKind

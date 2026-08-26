@@ -29,17 +29,17 @@ public sealed class BackendCollector : IDisposable
 
     public event Action<MetricSnapshot>? SnapshotUpdated;
 
-    public BackendCollector(EndpointRef endpoint, BackendKind? knownKind)
-        : this(endpoint, knownKind, kind => CreateAdapter(kind))
+    public BackendCollector(EndpointRef endpoint, BackendKind? knownKind, string? modelId = null)
+        : this(endpoint, knownKind, kind => CreateAdapter(kind, modelId), endpoint.AuthToken)
     {
     }
 
     internal BackendCollector(EndpointRef endpoint, BackendKind? knownKind,
-        Func<BackendKind, IBackendAdapter> adapterFactory)
+        Func<BackendKind, IBackendAdapter> adapterFactory, string? authToken = null)
     {
         _endpoint = endpoint;
         _adapterFactory = adapterFactory;
-        _client = SharedClientFactory.Create();
+        _client = SharedClientFactory.Create(authToken ?? endpoint.AuthToken);
         _client.Timeout = PollTimeout;
         KnownKind = knownKind;
     }
@@ -47,11 +47,12 @@ public sealed class BackendCollector : IDisposable
     public EndpointRef Endpoint => _endpoint;
     public BackendKind? KnownKind { get; private set; }
     public MetricSnapshot? Latest => Volatile.Read(ref _latest);
+    public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
-    private static IBackendAdapter CreateAdapter(BackendKind kind) => kind switch
+    private static IBackendAdapter CreateAdapter(BackendKind kind, string? modelId = null) => kind switch
     {
         BackendKind.Vllm => new VllmAdapter(),
-        BackendKind.LlamaCpp => new LlamaCppAdapter(),
+        BackendKind.LlamaCpp => new LlamaCppAdapter(modelId),
         BackendKind.LmStudio => new LmStudioAdapter(),
         BackendKind.Ollama => new OllamaAdapter(),
         BackendKind.GenericOpenAi => new GenericOpenAiAdapter(),

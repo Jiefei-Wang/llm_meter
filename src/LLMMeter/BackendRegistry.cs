@@ -82,6 +82,7 @@ public sealed class BackendRegistry : IDisposable
                 Name = e.Name,
                 Url = e.Url.Trim(),
                 Type = e.Type,
+                ApiKey = e.ApiKey,
             });
             try { _configService.Save(_config); }
             catch (Exception ex)
@@ -92,13 +93,13 @@ public sealed class BackendRegistry : IDisposable
 
         var endpoint = MakeEndpointForManual(e);
         _discovery.AddKnownEndpoint(endpoint.Id);
+        _discovery.AddKnownEndpoint(endpoint.DedupeKey);
         TargetsChanged?.Invoke();
         return e;
     }
 
     public void RemoveManualEndpoint(string url)
     {
-        List<BackendTarget> removedTargets = [];
         lock (_lock)
         {
             _config.ManualBackends.RemoveAll(m => m.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
@@ -107,9 +108,33 @@ public sealed class BackendRegistry : IDisposable
             catch (Exception ex) { Log.Warn($"failed saving config: {ex.Message}"); }
         }
 
-        string id = $"manual|{new Uri(url).Host}:{new Uri(url).Port}";
-        lock (_lock) _discovered.Remove(id);
-        _discovery.RemoveKnownEndpoint(id);
+        if (Uri.TryCreate(url, UriKind.Absolute, out var parsedUri))
+        {
+            var norm = HttpService.NormalizeBase(parsedUri);
+            string id = DiscoveryService.MakeId(OriginKind.Manual, null, norm);
+            string dedupeKey = EndpointRef.NormalizeEndpointKey(norm);
+
+            lock (_lock) _discovered.Remove(id);
+            _discovery.RemoveKnownEndpoint(id);
+            _discovery.RemoveKnownEndpoint(dedupeKey);
+
+            // Check if any other endpoint is still using this physical server
+            bool stillInUse;
+            lock (_lock)
+            {
+                stillInUse = _config.ManualBackends.Any(m =>
+                    Uri.TryCreate(m.Url, UriKind.Absolute, out var u) &&
+                    EndpointRef.NormalizeEndpointKey(u).Equals(dedupeKey, StringComparison.OrdinalIgnoreCase))
+                    || _discovered.Values.Any(s =>
+                    EndpointRef.NormalizeEndpointKey(s.Endpoint.BaseUrl).Equals(dedupeKey, StringComparison.OrdinalIgnoreCase));
+            }
+
+            if (!stillInUse)
+            {
+                Collectors.Remove(dedupeKey);
+            }
+        }
+
         TargetsChanged?.Invoke();
     }
 
@@ -117,7 +142,7 @@ public sealed class BackendRegistry : IDisposable
     {
         var uri = HttpService.NormalizeBase(new Uri(e.Url.Trim()));
         string id = DiscoveryService.MakeId(OriginKind.Manual, null, uri);
-        return new EndpointRef(id, uri, OriginKind.Manual, null);
+        return new EndpointRef(id, uri, OriginKind.Manual, null, e.PlainTextApiKey);
     }
 
     private IEnumerable<string> ManualEndpointIds()
@@ -125,7 +150,10 @@ public sealed class BackendRegistry : IDisposable
         foreach (var m in _config.ManualBackends)
         {
             if (Uri.TryCreate(m.Url, UriKind.Absolute, out var uri))
+            {
                 yield return DiscoveryService.MakeId(OriginKind.Manual, null, uri);
+                yield return EndpointRef.NormalizeEndpointKey(uri);
+            }
         }
     }
 
@@ -167,14 +195,31 @@ public sealed class BackendRegistry : IDisposable
         {
             var collector = Collectors.GetOrAdd(s.Endpoint, s.Kind);
             var latest = collector.Latest;
-            list.Add(new TargetEntry(
-                new BackendTarget(
-                    s.Endpoint.Id, s.Endpoint, s.Kind, null,
-                    DescribeTarget(s.Kind, s.Endpoint, latest?.ModelName)),
-                group,
-                IsOnline(latest),
-                latest?.ModelName,
-                latest?.State ?? ConnectionState.Connecting));
+            if (latest?.LoadedModels is { Count: > 1 } models)
+            {
+                foreach (var model in models)
+                {
+                    string targetId = $"{s.Endpoint.Id}|{model}";
+                    string label = DescribeTarget(s.Kind, s.Endpoint, model);
+                    list.Add(new TargetEntry(
+                        new BackendTarget(targetId, s.Endpoint, s.Kind, model, label),
+                        group,
+                        IsOnline(latest),
+                        model,
+                        latest?.State ?? ConnectionState.Connecting));
+                }
+            }
+            else
+            {
+                list.Add(new TargetEntry(
+                    new BackendTarget(
+                        s.Endpoint.Id, s.Endpoint, s.Kind, null,
+                        DescribeTarget(s.Kind, s.Endpoint, latest?.ModelName)),
+                    group,
+                    IsOnline(latest),
+                    latest?.ModelName,
+                    latest?.State ?? ConnectionState.Connecting));
+            }
         }
 
         foreach (var s in discovered.Where(d => d.Endpoint.Origin == OriginKind.WindowsHost))
@@ -194,7 +239,7 @@ public sealed class BackendRegistry : IDisposable
             if (!Uri.TryCreate(m.Url, UriKind.Absolute, out var uri)) continue;
             var norm = HttpService.NormalizeBase(uri);
             string id = DiscoveryService.MakeId(OriginKind.Manual, null, norm);
-            var endpoint = new EndpointRef(id, norm, OriginKind.Manual, null);
+            var endpoint = new EndpointRef(id, norm, OriginKind.Manual, null, m.PlainTextApiKey);
             var collector = Collectors.GetOrAdd(endpoint, LookupManualKind(m));
             var latest = collector.Latest;
 
@@ -203,12 +248,29 @@ public sealed class BackendRegistry : IDisposable
                 : m.Name;
             if (!string.IsNullOrWhiteSpace(m.Name)) label += $"  ({norm.Host}:{norm.Port})";
 
-            list.Add(new TargetEntry(
-                new BackendTarget(id, endpoint, collector.KnownKind ?? BackendKind.Unknown, null, label),
-                "Manual",
-                IsOnline(latest),
-                latest?.ModelName,
-                latest?.State ?? ConnectionState.Connecting));
+            if (latest?.LoadedModels is { Count: > 1 } models)
+            {
+                foreach (var model in models)
+                {
+                    string targetId = $"{id}|{model}";
+                    string modelLabel = $"{label} · {model}";
+                    list.Add(new TargetEntry(
+                        new BackendTarget(targetId, endpoint, collector.KnownKind ?? BackendKind.Unknown, model, modelLabel),
+                        "Manual",
+                        IsOnline(latest),
+                        model,
+                        latest?.State ?? ConnectionState.Connecting));
+                }
+            }
+            else
+            {
+                list.Add(new TargetEntry(
+                    new BackendTarget(id, endpoint, collector.KnownKind ?? BackendKind.Unknown, null, label),
+                    "Manual",
+                    IsOnline(latest),
+                    latest?.ModelName,
+                    latest?.State ?? ConnectionState.Connecting));
+            }
         }
 
         return list;

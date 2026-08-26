@@ -29,6 +29,7 @@ public sealed class DiscoveryService : IDisposable
 
     /// <summary>Endpoints already known (manual config) — skipped in results.</summary>
     private readonly HashSet<string> _knownEndpointIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _knownEndpointKeys = new(StringComparer.OrdinalIgnoreCase);
 
     public event Action<IReadOnlyList<DiscoveredServer>>? Updated;
 
@@ -75,8 +76,41 @@ public sealed class DiscoveryService : IDisposable
         }
     }
 
-    public void AddKnownEndpoint(string id) { lock (_lock) _knownEndpointIds.Add(id); }
-    public void RemoveKnownEndpoint(string id) { lock (_lock) _knownEndpointIds.Remove(id); }
+    public void AddKnownEndpoint(string id)
+    {
+        lock (_lock)
+        {
+            _knownEndpointIds.Add(id);
+            if (Uri.TryCreate(id, UriKind.Absolute, out var uri))
+            {
+                _knownEndpointKeys.Add(EndpointRef.NormalizeEndpointKey(uri));
+            }
+            else if (id.Contains('|'))
+            {
+                var hostPort = id.Split('|')[^1];
+                if (Uri.TryCreate($"http://{hostPort}", UriKind.Absolute, out var parsed))
+                    _knownEndpointKeys.Add(EndpointRef.NormalizeEndpointKey(parsed));
+            }
+        }
+    }
+
+    public void RemoveKnownEndpoint(string id)
+    {
+        lock (_lock)
+        {
+            _knownEndpointIds.Remove(id);
+            if (Uri.TryCreate(id, UriKind.Absolute, out var uri))
+            {
+                _knownEndpointKeys.Remove(EndpointRef.NormalizeEndpointKey(uri));
+            }
+            else if (id.Contains('|'))
+            {
+                var hostPort = id.Split('|')[^1];
+                if (Uri.TryCreate($"http://{hostPort}", UriKind.Absolute, out var parsed))
+                    _knownEndpointKeys.Remove(EndpointRef.NormalizeEndpointKey(parsed));
+            }
+        }
+    }
 
     public async Task<IReadOnlyList<DiscoveredServer>> ScanOnceAsync(CancellationToken ct)
     {
@@ -155,11 +189,13 @@ public sealed class DiscoveryService : IDisposable
                 OriginKind.Wsl => $"wsl|{c.distro}|{c.url.Host}:{c.url.Port}",
                 _ => $"win|{c.url.Host}:{c.url.Port}",
             };
+            string normKey = EndpointRef.NormalizeEndpointKey(c.url);
             lock (_lock)
             {
                 if (_knownEndpointIds.Contains(key)) continue;
+                if (c.origin == OriginKind.WindowsHost && _knownEndpointKeys.Contains(normKey)) continue;
             }
-            string dedupeKey = $"{c.origin}|{c.distro}|{c.url.AbsoluteUri}";
+            string dedupeKey = $"{c.origin}|{c.distro}|{normKey}";
             if (!seenUrls.Add(dedupeKey)) continue;
             toProbe.Add(c);
         }

@@ -37,7 +37,9 @@ public partial class AddBackendDialog : Window
         ResultText.Text = "Probing…";
         try
         {
-            var fp = await new EndpointFingerprinter()
+            string? token = string.IsNullOrWhiteSpace(TokenBox.Password) ? null : TokenBox.Password.Trim();
+            using var http = HttpService.CreateOwning(HttpService.NormalizeBase(uri), TimeSpan.FromMilliseconds(800), token);
+            var fp = await new EndpointFingerprinter(_ => http)
                 .FingerprintAsync(HttpService.NormalizeBase(uri), CancellationToken.None);
             ResultText.Text = fp.Kind == BackendKind.Unknown
                 ? $"No recognized backend ({fp.Evidence})"
@@ -68,6 +70,8 @@ public partial class AddBackendDialog : Window
                 Url = url,
                 Type = MapType(TypeBox.SelectedItem as string ?? "Auto detect"),
             };
+            if (!string.IsNullOrWhiteSpace(TokenBox.Password))
+                manual.PlainTextApiKey = TokenBox.Password.Trim();
             await _services.Registry.AddManualEndpointAsync(manual);
 
             // bind the newest window (or create one) to it right away

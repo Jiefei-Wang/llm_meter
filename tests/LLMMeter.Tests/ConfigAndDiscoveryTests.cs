@@ -217,3 +217,61 @@ public class ProcNetParserTests
         Assert.Empty(ProcNetParser.ParseListeners(content!));
     }
 }
+
+public class CollectorLifecycleAndDeduplicationTests
+{
+    [Fact]
+    public async Task Manual_Endpoint_Deduplication_Prevents_Duplicate_Windows_Auto_Discovery()
+    {
+        var config = new DiscoveryConfig
+        {
+            Enabled = true,
+            KnownPorts = [8000],
+            WindowsListeners = false,
+            WslEnabled = false,
+        };
+        using var discovery = new DiscoveryService(config);
+
+        // Register manual endpoint: both URL string and manual ID
+        discovery.AddKnownEndpoint("http://127.0.0.1:8000");
+
+        var results = await discovery.ScanOnceAsync(default);
+        // The candidate 127.0.0.1:8000 from KnownPorts must be filtered out
+        Assert.DoesNotContain(results, r => r.Endpoint.BaseUrl.Port == 8000);
+    }
+
+    [Fact]
+    public void CollectorManager_Remove_Stops_Polling_And_Disposes_Collector()
+    {
+        using var mgr = new LLMMeter.Collection.CollectorManager();
+        var endpoint = new LLMMeter.Core.EndpointRef("manual|127.0.0.1:8888", new Uri("http://127.0.0.1:8888"), LLMMeter.Core.OriginKind.Manual, null);
+
+        var collector = mgr.GetOrAdd(endpoint, LLMMeter.Core.BackendKind.GenericOpenAi);
+        Assert.False(collector.IsDisposed);
+        Assert.Equal(1, mgr.Count);
+
+        bool removed = mgr.Remove(endpoint.Id);
+        Assert.True(removed);
+        Assert.True(collector.IsDisposed);
+        Assert.Equal(0, mgr.Count);
+    }
+
+    [Fact]
+    public void Credential_Protection_Encrypts_And_Decrypts_Api_Keys()
+    {
+        var config = new ManualEndpointConfig
+        {
+            Name = "Protected Backend",
+            Url = "http://127.0.0.1:8000",
+            PlainTextApiKey = "sk-super-secret-key-12345",
+        };
+
+        // When PlainTextApiKey is set, ApiKey is encrypted with enc: prefix
+        Assert.NotNull(config.ApiKey);
+        Assert.StartsWith("enc:", config.ApiKey!);
+        Assert.NotEqual("sk-super-secret-key-12345", config.ApiKey);
+
+        // PlainTextApiKey round-trips decrypting the ciphertext
+        Assert.Equal("sk-super-secret-key-12345", config.PlainTextApiKey);
+    }
+}

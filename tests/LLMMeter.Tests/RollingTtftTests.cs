@@ -16,6 +16,13 @@ public class RollingTtftTests
         ttft.Observe(2, 0.500, Ticks(2)); // next request, TTFT = 0.5 - 0.4 = 100 ms
 
         Assert.Equal((0.4 + 0.1) / 2, ttft.AverageSeconds()!.Value, 6);
+        // With only 2 samples in a window of 10, the window is not yet full
+        Assert.False(ttft.IsExactEstimate());
+
+        // Once 10 single-request samples contribute, the window is exact
+        for (int i = 3; i <= 10; i++)
+            ttft.Observe(i, 0.500 + (i - 2) * 0.1, Ticks(i));
+
         Assert.True(ttft.IsExactEstimate());
     }
 
@@ -79,11 +86,11 @@ public class RollingTtftTests
     [Fact]
     public void AddExact_Contributes_Weight_One()
     {
-        var ttft = new RollingTtft(10);
+        var ttft = new RollingTtft(2);
         ttft.AddExact(0.2);
         ttft.AddExact(0.4);
         Assert.Equal(0.3, ttft.AverageSeconds()!.Value, 6);
-        // both samples came from single-request deltas → still exact
+        // both samples came from single-request deltas and fill the 2-sample window → exact
         Assert.True(ttft.IsExactEstimate());
     }
 }

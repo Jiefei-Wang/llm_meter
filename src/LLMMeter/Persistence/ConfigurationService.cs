@@ -9,6 +9,59 @@ public sealed class ManualEndpointConfig
     public string Name { get; set; } = "";
     public string Url { get; set; } = "";       // full base URL, e.g. http://192.168.1.31:8000
     public string Type { get; set; } = "Auto";  // Auto|Vllm|LlamaCpp|LmStudio|Ollama|OpenAi
+
+    /// <summary>Optional encrypted Bearer token (DPAPI-protected base64 when on Windows).</summary>
+    [JsonPropertyName("apiKey")]
+    public string? ApiKey { get; set; }
+
+    [JsonIgnore]
+    public string? PlainTextApiKey
+    {
+        get => CredentialProtection.Unprotect(ApiKey);
+        set => ApiKey = CredentialProtection.Protect(value);
+    }
+}
+
+/// <summary>
+/// Isolates credential encryption so tokens are never stored or logged in plaintext.
+/// Uses Windows DPAPI (CurrentUser) when available.
+/// </summary>
+public static class CredentialProtection
+{
+    public static string? Protect(string? plainText)
+    {
+        if (string.IsNullOrWhiteSpace(plainText)) return null;
+        if (!OperatingSystem.IsWindows()) return plainText.Trim();
+        try
+        {
+            var bytes = System.Text.Encoding.UTF8.GetBytes(plainText.Trim());
+            var enc = System.Security.Cryptography.ProtectedData.Protect(
+                bytes, null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
+            return "enc:" + Convert.ToBase64String(enc);
+        }
+        catch
+        {
+            return plainText.Trim();
+        }
+    }
+
+    public static string? Unprotect(string? stored)
+    {
+        if (string.IsNullOrWhiteSpace(stored)) return null;
+        if (!stored.StartsWith("enc:", StringComparison.Ordinal) || !OperatingSystem.IsWindows())
+            return stored; // plaintext fallback or non-Windows
+        try
+        {
+            var bytes = Convert.FromBase64String(stored[4..]);
+            var dec = System.Security.Cryptography.ProtectedData.Unprotect(
+                bytes, null, System.Security.Cryptography.DataProtectionScope.CurrentUser);
+            return System.Text.Encoding.UTF8.GetString(dec);
+        }
+        catch
+        {
+            return null;
+        }
+    }
 }
 
 public sealed class WindowConfig

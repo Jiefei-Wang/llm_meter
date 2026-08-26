@@ -17,6 +17,9 @@ public sealed class LlamaCppAdapter : IBackendAdapter
     private readonly RateCalculator _prefill = new();
     private readonly RateCalculator _gen = new();
     private readonly SlotTracker _slots = new();
+    private readonly string? _modelId;
+    internal Func<long> Clock = () => MonoClock.NowTicks;
+
     // /metrics state
     private bool? _metricsEnabled;
     private bool _slotsAvailable;
@@ -25,20 +28,43 @@ public sealed class LlamaCppAdapter : IBackendAdapter
     // /props state
     private int? _totalSlots;
     private string? _modelPath;
+    private long _lastPropsAttemptTicks;
 
-    // Cumulative generated tokens (since monitoring began). We sum positive
-    // n_decoded increments per slot; a reset between tasks never subtracts.
-    private readonly Dictionary<int, long> _slotLastDecoded = new();
+    // Cumulative generated and prefilled tokens (since monitoring began).
+    // Uses task-aware state so task changes and slot reuse re-baseline instead of cross-contaminating.
+    private sealed class SlotCounterState
+    {
+        public long TaskId = -1;
+        public long LastDecoded = -1;
+        public long LastProcessed = -1;
+    }
+
+    private readonly Dictionary<int, SlotCounterState> _slotStates = new();
     private long _generatedTotal;
-
-    // Cumulative prefilled prompt tokens (since monitoring began).
-    private readonly Dictionary<int, long> _slotLastProcessed = new();
     private long _prefilledTotal;
 
     internal static readonly string[] ProcessingNames = ["llamacpp:requests_processing"];
     internal static readonly string[] DeferredNames = ["llamacpp:requests_deferred"];
     internal static readonly string[] PrefillCounterNames = ["llamacpp:prompt_tokens_total"];
     internal static readonly string[] GenCounterNames = ["llamacpp:tokens_predicted_total"];
+    internal static readonly string[] PrefillGaugeNames = ["llamacpp:prompt_tokens_seconds"];
+    internal static readonly string[] GenGaugeNames = ["llamacpp:predicted_tokens_seconds"];
+
+    public LlamaCppAdapter(string? modelId = null)
+    {
+        _modelId = modelId;
+        if (!string.IsNullOrEmpty(modelId))
+            _modelPath = modelId;
+    }
+
+    public string? ModelId => _modelId;
+
+    private string EndpointPath(string baseEndpoint)
+    {
+        if (string.IsNullOrEmpty(_modelId))
+            return baseEndpoint;
+        return $"{baseEndpoint}?model={Uri.EscapeDataString(_modelId)}";
+    }
 
     public BackendCapabilities Capabilities =>
         BackendCapabilities.RunningRequests                       // both modes
@@ -46,7 +72,6 @@ public sealed class LlamaCppAdapter : IBackendAdapter
         | (_metricsEnabled == true
             ? BackendCapabilities.QueuedRequests
               | BackendCapabilities.AggregatePrefillRate
-              | BackendCapabilities.RecentRequestTtft
               | (_slotsAvailable
                   ? BackendCapabilities.ActiveRequestEnumeration
                     | BackendCapabilities.PerRequestInputTokens
@@ -64,15 +89,89 @@ public sealed class LlamaCppAdapter : IBackendAdapter
 
     public async Task<FingerprintResult?> IdentifyAsync(IHttp http, CancellationToken ct)
     {
-        var (status, body) = await http.GetStringAsync("metrics", ct).ConfigureAwait(false);
+        var (status, body) = await http.GetStringAsync(EndpointPath("metrics"), ct).ConfigureAwait(false);
         if (status == 200 && body.Contains("llamacpp:", StringComparison.Ordinal))
             return new FingerprintResult(Kind, "/metrics contains llamacpp:* families");
 
-        var slots = await http.GetJsonAsync("slots", ct).ConfigureAwait(false);
+        var slots = await http.GetJsonAsync(EndpointPath("slots"), ct).ConfigureAwait(false);
         if (slots.HasValue && LooksLikeSlots(slots.Value))
             return new FingerprintResult(Kind, "/slots returns llama.cpp slot structures");
 
+        // Check for llama-server router / multi-model mode
+        if (string.IsNullOrEmpty(_modelId))
+        {
+            var routerResult = await IdentifyRouterAsync(http, ct).ConfigureAwait(false);
+            if (routerResult != null)
+                return routerResult;
+        }
+
         return null;
+    }
+
+    private async Task<FingerprintResult?> IdentifyRouterAsync(IHttp http, CancellationToken ct)
+    {
+        var models = await EnumerateModelsAsync(http, ct).ConfigureAwait(false);
+        if (models.Count == 0) return null;
+
+        string firstModel = models[0];
+        string probePath = $"metrics?model={Uri.EscapeDataString(firstModel)}";
+        var (status, body) = await http.GetStringAsync(probePath, ct).ConfigureAwait(false);
+        if (status == 200 && body.Contains("llamacpp:", StringComparison.Ordinal))
+            return new FingerprintResult(Kind, $"llama-server router mode ({models.Count} models)");
+
+        var slots = await http.GetJsonAsync($"slots?model={Uri.EscapeDataString(firstModel)}", ct).ConfigureAwait(false);
+        if (slots.HasValue && LooksLikeSlots(slots.Value))
+            return new FingerprintResult(Kind, $"llama-server router mode via /slots ({models.Count} models)");
+
+        var props = await http.GetJsonAsync($"props?model={Uri.EscapeDataString(firstModel)}", ct).ConfigureAwait(false);
+        if (props.HasValue && (props.Value.TryGetProperty("total_slots", out _) || props.Value.TryGetProperty("model_path", out _)))
+            return new FingerprintResult(Kind, $"llama-server router mode via /props ({models.Count} models)");
+
+        return null;
+    }
+
+    internal static async Task<List<string>> EnumerateModelsAsync(IHttp http, CancellationToken ct)
+    {
+        var list = new List<string>();
+        var v1 = await http.GetJsonAsync("v1/models", ct).ConfigureAwait(false);
+        if (v1.HasValue && v1.Value.ValueKind == JsonValueKind.Object &&
+            v1.Value.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in data.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("id", out var id) &&
+                    id.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(id.GetString()))
+                    list.Add(id.GetString()!);
+            }
+        }
+        if (list.Count > 0) return list;
+
+        var models = await http.GetJsonAsync("models", ct).ConfigureAwait(false);
+        if (models.HasValue)
+        {
+            if (models.Value.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in models.Value.EnumerateArray())
+                {
+                    if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("id", out var id) &&
+                        id.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(id.GetString()))
+                        list.Add(id.GetString()!);
+                    else if (item.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(item.GetString()))
+                        list.Add(item.GetString()!);
+                }
+            }
+            else if (models.Value.ValueKind == JsonValueKind.Object &&
+                     models.Value.TryGetProperty("models", out var inner) && inner.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in inner.EnumerateArray())
+                {
+                    if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("name", out var name) &&
+                        name.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(name.GetString()))
+                        list.Add(name.GetString()!);
+                }
+            }
+        }
+        return list;
     }
 
     internal static bool LooksLikeSlots(JsonElement el)
@@ -91,22 +190,28 @@ public sealed class LlamaCppAdapter : IBackendAdapter
 
     public async Task<MetricSnapshot> CollectAsync(IHttp http, CancellationToken ct)
     {
-        var now = MonoClock.NowTicks;
+        var now = Clock();
         var info = new Dictionary<string, string>();
 
         // --- /props occasionally for metadata
-        if ((_modelPath is null || _totalSlots is null) && now - _lastTicks > Stopwatch.Frequency * 5)
+        if ((_modelPath is null || _totalSlots is null) &&
+            (_lastPropsAttemptTicks == 0 || now - _lastPropsAttemptTicks >= Stopwatch.Frequency * 5))
         {
-            var props = await http.GetJsonAsync("props", ct).ConfigureAwait(false);
+            _lastPropsAttemptTicks = now;
+            var props = await http.GetJsonAsync(EndpointPath("props"), ct).ConfigureAwait(false);
             if (props.HasValue && props.Value.ValueKind == JsonValueKind.Object)
             {
                 if (props.Value.TryGetProperty("total_slots", out var ts) && ts.ValueKind == JsonValueKind.Number)
                     _totalSlots = ts.GetInt32();
-                if (props.Value.TryGetProperty("default_generation_settings", out var dgs) &&
+                if (props.Value.TryGetProperty("model_path", out var mp) && mp.ValueKind == JsonValueKind.String &&
+                    !string.IsNullOrWhiteSpace(mp.GetString()))
+                    _modelPath = Path.GetFileName(mp.GetString());
+                else if (props.Value.TryGetProperty("default_generation_settings", out var dgs) &&
                     dgs.ValueKind == JsonValueKind.Object &&
                     dgs.TryGetProperty("model", out var mdl) && mdl.ValueKind == JsonValueKind.Object &&
-                    mdl.TryGetProperty("path", out var p) && p.ValueKind == JsonValueKind.String)
-                    _modelPath = Path.GetFileName(p.GetString() ?? "");
+                    mdl.TryGetProperty("path", out var p) && p.ValueKind == JsonValueKind.String &&
+                    !string.IsNullOrWhiteSpace(p.GetString()))
+                    _modelPath = Path.GetFileName(p.GetString());
             }
         }
 
@@ -114,8 +219,8 @@ public sealed class LlamaCppAdapter : IBackendAdapter
         // a busy server, and waiting for it before /slots made the UI feel stale.
         // /slots is also needed for the active-request rows: Prometheus only has
         // aggregate request gauges.
-        var metricsTask = http.GetStringAsync("metrics", ct);
-        var slotsTask = http.GetJsonAsync("slots", ct);
+        var metricsTask = http.GetStringAsync(EndpointPath("metrics"), ct);
+        var slotsTask = http.GetJsonAsync(EndpointPath("slots"), ct);
         await Task.WhenAll(metricsTask, slotsTask).ConfigureAwait(false);
         var (status, body) = await metricsTask.ConfigureAwait(false);
         var slots = await slotsTask.ConfigureAwait(false);
@@ -129,6 +234,32 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             return _slotsAvailable
                 ? WithRequests(snapshot, CollectRequestRows(slots!.Value, now))
                 : snapshot;
+        }
+
+        // Check for router mode when not already scoped to a specific model
+        if (string.IsNullOrEmpty(_modelId))
+        {
+            var routerModels = await EnumerateModelsAsync(http, ct).ConfigureAwait(false);
+            if (routerModels.Count > 0)
+            {
+                info["Mode"] = $"router mode ({routerModels.Count} models)";
+                return new MetricSnapshot
+                {
+                    Timestamp = DateTimeOffset.Now,
+                    State = ConnectionState.Online,
+                    Kind = Kind,
+                    Running = MetricValue<int>.None,
+                    Queued = MetricValue<int>.None,
+                    PrefillTokPerSec = MetricValue<double>.None,
+                    GenerationTokPerSec = MetricValue<double>.None,
+                    KvCacheUsage = MetricValue<double>.None,
+                    RecentTtftMs = MetricValue<double>.None,
+                    Requests = null,
+                    ModelName = _modelPath ?? routerModels[0],
+                    LoadedModels = routerModels,
+                    Info = info,
+                };
+            }
         }
 
         // --- /slots fallback
@@ -166,8 +297,20 @@ public sealed class LlamaCppAdapter : IBackendAdapter
 
     internal static MetricSnapshot WithRequests(MetricSnapshot snapshot, IReadOnlyList<RequestSnapshot> requests)
     {
-        var livePrefill = SumRates(requests.Select(request => request.PrefillTokensPerSecond));
-        var liveDecode = SumRates(requests.Select(request => request.TokensPerSecond));
+        var livePrefill = ResolveAggregateRate(
+            requests,
+            isCandidate: r => (!r.OutputTokens.HasValue || r.OutputTokens.Value == 0) || r.PrefillTokensPerSecond.HasValue,
+            rateSelector: r => r.PrefillTokensPerSecond,
+            fallbackAggregate: snapshot.PrefillTokPerSec,
+            rateDescription: "prefill");
+
+        var liveDecode = ResolveAggregateRate(
+            requests,
+            isCandidate: r => (r.OutputTokens.HasValue && r.OutputTokens.Value > 0) || r.TokensPerSecond.HasValue,
+            rateSelector: r => r.TokensPerSecond,
+            fallbackAggregate: snapshot.GenerationTokPerSec,
+            rateDescription: "generation");
+
         return new MetricSnapshot
         {
             Timestamp = snapshot.Timestamp,
@@ -186,14 +329,40 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             LoadedModels = snapshot.LoadedModels,
             Info = snapshot.Info,
         };
+    }
 
-        static MetricValue<double> SumRates(IEnumerable<MetricValue<double>> rates)
+    private static MetricValue<double> ResolveAggregateRate(
+        IReadOnlyList<RequestSnapshot> requests,
+        Func<RequestSnapshot, bool> isCandidate,
+        Func<RequestSnapshot, MetricValue<double>> rateSelector,
+        MetricValue<double> fallbackAggregate,
+        string rateDescription)
+    {
+        var candidates = requests.Where(isCandidate).ToList();
+        if (candidates.Count == 0)
+            return fallbackAggregate;
+
+        var withValidRate = candidates.Where(r => rateSelector(r).HasValue).ToList();
+        if (withValidRate.Count == candidates.Count)
         {
-            var available = rates.Where(rate => rate.HasValue).ToArray();
-            return available.Length > 0
-                ? MetricValue<double>.Approx(available.Sum(rate => rate.Value), MetricSource.Derived, "sum of live /slots rates")
-                : MetricValue<double>.None;
+            return MetricValue<double>.Approx(
+                withValidRate.Sum(r => rateSelector(r).Value),
+                MetricSource.Derived,
+                $"sum of live /slots {rateDescription} rates");
         }
+
+        if (fallbackAggregate.HasValue)
+            return fallbackAggregate;
+
+        if (withValidRate.Count > 0)
+        {
+            return MetricValue<double>.Approx(
+                withValidRate.Sum(r => rateSelector(r).Value),
+                MetricSource.Derived,
+                $"partial sum of live /slots {rateDescription} rates");
+        }
+
+        return MetricValue<double>.None;
     }
 
     private MetricSnapshot CollectFromMetrics(
@@ -234,7 +403,20 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             : MetricValue<int>.None;
 
         var prefillRate = prefillC.HasValue ? _prefill.Update(prefillC.Value, now) : MetricValue<double>.None;
+        if (!prefillRate.HasValue)
+        {
+            var pGauge = First(PrefillGaugeNames);
+            if (pGauge.HasValue)
+                prefillRate = MetricValue<double>.Exact(pGauge.Value, MetricSource.NativeMetrics, "llamacpp:prompt_tokens_seconds");
+        }
+
         var genRate = genC.HasValue ? _gen.Update(genC.Value, now) : MetricValue<double>.None;
+        if (!genRate.HasValue)
+        {
+            var gGauge = First(GenGaugeNames);
+            if (gGauge.HasValue)
+                genRate = MetricValue<double>.Exact(gGauge.Value, MetricSource.NativeMetrics, "llamacpp:predicted_tokens_seconds");
+        }
 
         // llama.cpp exposes no KV usage metric family today — stay honest.
         var kv = MetricValue<double>.None;
@@ -273,10 +455,6 @@ public sealed class LlamaCppAdapter : IBackendAdapter
     {
         int processing = 0;
         var requests = new List<RequestSnapshot>();
-        double decodedTotal = 0;
-        double prefillProcessedTotal = 0;
-        bool hasDecoded = false;
-        bool hasPrefillProgress = false;
 
         foreach (var slot in arr.EnumerateArray())
         {
@@ -291,39 +469,31 @@ public sealed class LlamaCppAdapter : IBackendAdapter
 
             long nDecoded = ReadNDecoded(slot);
             long nPrompt = ReadNPrompt(slot);
-            if (nDecoded >= 0) { decodedTotal += nDecoded; hasDecoded = true; }
-
-            // Accumulate positive n_decoded deltas toward the running total.
-            if (id >= 0 && nDecoded >= 0 && _slotLastDecoded.TryGetValue(id, out var prev))
-            {
-                if (nDecoded > prev) _generatedTotal += nDecoded - prev;
-            }
-            if (id >= 0 && nDecoded >= 0) _slotLastDecoded[id] = nDecoded;
-
-            // Prefill progress is tracked only while the slot is actually
-            // processing; once generation begins the processed count is static.
-            long processed = -1;
-            if (isProcessing)
-            {
-                processed = ReadNProcessed(slot);
-                if (processed >= 0) { prefillProcessedTotal += processed; hasPrefillProgress = true; }
-                if (id >= 0 && processed >= 0 && _slotLastProcessed.TryGetValue(id, out var prevProc))
-                {
-                    if (processed > prevProc) _prefilledTotal += processed - prevProc;
-                }
-                if (id >= 0 && processed >= 0) _slotLastProcessed[id] = processed;
-            }
-
+            long processed = isProcessing ? ReadNProcessed(slot) : -1;
             long cached = ReadNCached(slot);
             long input = processed >= 0 && cached >= 0 ? processed + cached : nPrompt;
+
+            if (id >= 0)
+            {
+                UpdateSlotTotals(id, task, nDecoded, processed);
+            }
+
             var req = _slots.Observe(id, task, input, nDecoded, now, isProcessing, processed, cached);
             if (req != null && isProcessing) requests.Add(req);
         }
 
-        // Aggregate generation rate from total decoded tokens across slots.
-        var genRate = hasDecoded ? _gen.Update(decodedTotal, now) : MetricValue<double>.None;
-        // Aggregate prefill rate from total prompt tokens processed across slots.
-        var prefillRate = hasPrefillProgress ? _prefill.Update(prefillProcessedTotal, now) : MetricValue<double>.None;
+        // Aggregate generation rate from valid per-processing-slot generation rates
+        var validGenRates = requests.Where(r => r.TokensPerSecond.HasValue).Select(r => r.TokensPerSecond.Value).ToList();
+        var genRate = validGenRates.Count > 0
+            ? MetricValue<double>.Approx(validGenRates.Sum(), MetricSource.Derived, "sum of live /slots rates")
+            : MetricValue<double>.None;
+
+        // Aggregate prefill rate from valid per-processing-slot prefill rates
+        var validPrefillRates = requests.Where(r => r.PrefillTokensPerSecond.HasValue).Select(r => r.PrefillTokensPerSecond.Value).ToList();
+        var prefillRate = validPrefillRates.Count > 0
+            ? MetricValue<double>.Approx(validPrefillRates.Sum(), MetricSource.Derived, "sum of live /slots rates")
+            : MetricValue<double>.None;
+
         var running = MetricValue<int>.Exact(processing, MetricSource.NativeApi, "/slots processing count");
 
         var state = ConnectionState.Limited; // metrics disabled => limited by definition
@@ -360,6 +530,49 @@ public sealed class LlamaCppAdapter : IBackendAdapter
                 if ((s.TryGetProperty("is_processing", out var ip) && ip.ValueKind == JsonValueKind.True))
                     return true;
             return false;
+        }
+    }
+
+    private void UpdateSlotTotals(int slotId, long taskId, long nDecoded, long processed)
+    {
+        if (!_slotStates.TryGetValue(slotId, out var state))
+        {
+            state = new SlotCounterState
+            {
+                TaskId = taskId,
+                LastDecoded = nDecoded,
+                LastProcessed = processed,
+            };
+            _slotStates[slotId] = state;
+            return;
+        }
+
+        if (state.TaskId != taskId)
+        {
+            // Task changed: re-baseline without computing delta against previous task
+            state.TaskId = taskId;
+            state.LastDecoded = nDecoded;
+            state.LastProcessed = processed;
+            return;
+        }
+
+        // Same task: accumulate positive deltas
+        if (nDecoded >= 0)
+        {
+            if (state.LastDecoded >= 0 && nDecoded > state.LastDecoded)
+            {
+                _generatedTotal += (nDecoded - state.LastDecoded);
+            }
+            state.LastDecoded = nDecoded;
+        }
+
+        if (processed >= 0)
+        {
+            if (state.LastProcessed >= 0 && processed > state.LastProcessed)
+            {
+                _prefilledTotal += (processed - state.LastProcessed);
+            }
+            state.LastProcessed = processed;
         }
     }
 

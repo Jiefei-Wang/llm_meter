@@ -134,4 +134,66 @@ public class SlotTrackerTests
         Assert.InRange(r0!.TokensPerSecond.Value, 9.9, 10.1);
         Assert.InRange(r1!.TokensPerSecond.Value, 39.9, 40.1);
     }
+
+    [Fact]
+    public void Slot_Prefill_Rate_On_Task_Change_Rebaselines_Without_Fake_Rate()
+    {
+        var tracker = new SlotTracker();
+        // Task 10 prefilling
+        _ = tracker.Observe(0, 10, 1000, 0, Ticks(0), true, prefilledTokens: 200);
+        var r1 = tracker.Observe(0, 10, 1000, 0, Ticks(0.5), true, prefilledTokens: 600);
+        Assert.True(r1!.PrefillTokensPerSecond.HasValue);
+        Assert.InRange(r1.PrefillTokensPerSecond.Value, 799.9, 800.1);
+
+        // New task 11 starts prefilling on the same slot
+        var rNew = tracker.Observe(0, 11, 2000, 0, Ticks(1.0), true, prefilledTokens: 100);
+        Assert.NotNull(rNew);
+        Assert.Equal("#11", rNew!.Id);
+        Assert.False(rNew.PrefillTokensPerSecond.HasValue); // no rate on baseline sample of new task
+
+        // Subsequent delta derives rate accurately
+        var rNext = tracker.Observe(0, 11, 2000, 0, Ticks(1.5), true, prefilledTokens: 500);
+        Assert.True(rNext!.PrefillTokensPerSecond.HasValue);
+        Assert.InRange(rNext.PrefillTokensPerSecond.Value, 799.9, 800.1);
+    }
+
+    [Fact]
+    public async Task Cumulative_Slot_Totals_Do_Not_Cross_Contaminate_Task_Ids()
+    {
+        var adapter = new LlamaCppAdapter();
+        // Fallback slots-only mode (metrics disabled)
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["metrics"] = (-1, ""),
+            ["props"] = (200, """{"total_slots":1,"model_path":"/models/test.gguf"}"""),
+            ["slots"] = (200, ""),
+        };
+        var http = new FakeHttp(new Uri("http://x/"), routes);
+
+        // Poll 1: Slot 0, Task 100 baseline
+        routes["slots"] = (200, """[{"id":0,"is_processing":true,"id_task":100,"n_decoded":10,"n_prompt_tokens_processed":1000}]""");
+        await adapter.CollectAsync(http, default);
+
+        // Poll 2: Slot 0, Task 100 progress: decoded 10 -> 25 (+15), processed 1000 -> 1500 (+500)
+        routes["slots"] = (200, """[{"id":0,"is_processing":true,"id_task":100,"n_decoded":25,"n_prompt_tokens_processed":1500}]""");
+        var snap2 = await adapter.CollectAsync(http, default);
+        Assert.Equal(15, snap2.GeneratedTokensTotal.Value);
+        Assert.Equal(500, snap2.PrefilledTokensTotal.Value);
+
+        // Poll 3: Slot 0 reused for Task 101 with lower starting counters!
+        // Decoded drops from 25 to 5, processed drops from 1500 to 200.
+        // Must NOT decrease totals, fabricate negative delta, or add 5 as delta.
+        routes["slots"] = (200, """[{"id":0,"is_processing":true,"id_task":101,"n_decoded":5,"n_prompt_tokens_processed":200}]""");
+        var snap3 = await adapter.CollectAsync(http, default);
+        Assert.Equal(15, snap3.GeneratedTokensTotal.Value);
+        Assert.Equal(500, snap3.PrefilledTokensTotal.Value);
+
+        // Poll 4: Slot 0, Task 101 progress: decoded 5 -> 15 (+10), processed 200 -> 600 (+400)
+        routes["slots"] = (200, """[{"id":0,"is_processing":true,"id_task":101,"n_decoded":15,"n_prompt_tokens_processed":600}]""");
+        var snap4 = await adapter.CollectAsync(http, default);
+        // Total generated = 15 + 10 = 25
+        Assert.Equal(25, snap4.GeneratedTokensTotal.Value);
+        // Total prefilled = 500 + 400 = 900
+        Assert.Equal(900, snap4.PrefilledTokensTotal.Value);
+    }
 }

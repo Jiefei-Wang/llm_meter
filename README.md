@@ -29,7 +29,7 @@ For full llama-server telemetry, start it with `--metrics`. The `/slots` endpoin
 
 ## Install
 
-Download `LLMMeter.exe` from the [latest GitHub release](https://github.com/Jiefei-Wang/llm_monitor/releases/latest) and run it. The executable is self-contained; a separate .NET installation is not required.
+Download `LLMMeter.exe` from the [latest GitHub release](https://github.com/Jiefei-Wang/llm_meter/releases/latest) and run it. The executable is self-contained; a separate .NET installation is not required.
 
 LLM Meter places its configuration beside the executable in `LLMMeter.json`. Corrupt configuration is backed up with a `.broken` suffix and replaced safely.
 

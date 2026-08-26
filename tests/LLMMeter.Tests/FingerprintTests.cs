@@ -290,7 +290,7 @@ public class FingerprintTests
                   {"id":1,"n_ctx":4096,"speculative":false,"is_processing":false}
                 ]
                 """),
-            ["props"] = (200, """{"total_slots":2,"default_generation_settings":{"model":{"path":"/models/Qwen.gguf"}}}"""),
+            ["props"] = (200, """{"total_slots":2,"model_path":"/models/Qwen.gguf","default_generation_settings":{}}"""),
         });
 
         var snap = await adapter.CollectAsync(http, default);
@@ -370,5 +370,317 @@ public class FingerprintTests
 
         Assert.Equal(300, combined.PrefillTokPerSec.Value);
         Assert.Equal(40, combined.GenerationTokPerSec.Value);
+    }
+
+    [Fact]
+    public async Task Llama_Props_Legacy_Schema_Fallback_Works()
+    {
+        var adapter = new LlamaCppAdapter();
+        var http = new FakeHttp(new Uri("http://x/"), new Dictionary<string, (int, string)>
+        {
+            ["metrics"] = (-1, ""),
+            ["slots"] = (200, """[{"id":0,"is_processing":false}]"""),
+            ["props"] = (200, """{"total_slots":4,"default_generation_settings":{"model":{"path":"/legacy/path/ModelLegacy.gguf"}}}"""),
+        });
+
+        var snap = await adapter.CollectAsync(http, default);
+        Assert.Equal("ModelLegacy.gguf", snap.ModelName);
+    }
+
+    [Fact]
+    public async Task Llama_Props_Retry_Timing_Does_Not_Spam_And_Retries_After_5_Seconds()
+    {
+        var adapter = new LlamaCppAdapter();
+        long simulatedTicks = 10_000;
+        adapter.Clock = () => simulatedTicks;
+
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["metrics"] = (200, "llamacpp:prompt_tokens_total 10\n"),
+            ["slots"] = (200, "[]"),
+            ["props"] = (500, "internal error"), // initial failure
+        };
+        var http = new FakeHttp(new Uri("http://x/"), routes);
+
+        // First scrape at t=0: attempts /props and fails
+        await adapter.CollectAsync(http, default);
+        Assert.Equal(1, http.Requests.Count(r => r == "props"));
+
+        // Second scrape at t=500ms: must NOT retry /props yet
+        simulatedTicks += (long)(0.5 * System.Diagnostics.Stopwatch.Frequency);
+        await adapter.CollectAsync(http, default);
+        Assert.Equal(1, http.Requests.Count(r => r == "props"));
+
+        // Third scrape at t=5.2s: now retry is due!
+        routes["props"] = (200, """{"total_slots":2,"model_path":"/models/Retried.gguf","default_generation_settings":{}}""");
+        simulatedTicks += (long)(5.2 * System.Diagnostics.Stopwatch.Frequency);
+        var snap = await adapter.CollectAsync(http, default);
+        Assert.Equal(2, http.Requests.Count(r => r == "props"));
+        Assert.Equal("Retried.gguf", snap.ModelName);
+
+        // Fourth scrape at t=10s: metadata is already obtained, no more repeated /props calls!
+        simulatedTicks += (long)(5.0 * System.Diagnostics.Stopwatch.Frequency);
+        await adapter.CollectAsync(http, default);
+        Assert.Equal(2, http.Requests.Count(r => r == "props"));
+    }
+
+    [Fact]
+    public void Llama_Capabilities_Do_Not_Include_RecentRequestTtft()
+    {
+        var adapter = new LlamaCppAdapter();
+        Assert.False(adapter.Capabilities.HasFlag(BackendCapabilities.RecentRequestTtft));
+    }
+
+    [Fact]
+    public void Llama_Metrics_Avoid_Partial_Slot_Rates_Overriding_Valid_Aggregate_Rate()
+    {
+        var metrics = new MetricSnapshot
+        {
+            Timestamp = DateTimeOffset.UtcNow,
+            State = ConnectionState.Online,
+            Kind = BackendKind.LlamaCpp,
+            PrefillTokPerSec = MetricValue<double>.None,
+            GenerationTokPerSec = MetricValue<double>.Exact(120.0, MetricSource.NativeMetrics, "llamacpp:tokens_predicted_total delta"),
+        };
+
+        // 4 active requests in generation phase: 2 have live rates, 2 just started (no rate yet)
+        RequestSnapshot[] requests =
+        [
+            new() { Id = "#1", OutputTokens = MetricValue<long>.Exact(10), TokensPerSecond = MetricValue<double>.Approx(30.0) },
+            new() { Id = "#2", OutputTokens = MetricValue<long>.Exact(10), TokensPerSecond = MetricValue<double>.Approx(30.0) },
+            new() { Id = "#3", OutputTokens = MetricValue<long>.Exact(1), TokensPerSecond = MetricValue<double>.None },
+            new() { Id = "#4", OutputTokens = MetricValue<long>.Exact(1), TokensPerSecond = MetricValue<double>.None },
+        ];
+
+        var combined = LlamaCppAdapter.WithRequests(metrics, requests);
+
+        // Must preserve the complete aggregate 120.0 rate rather than under-reporting 60.0!
+        Assert.Equal(120.0, combined.GenerationTokPerSec.Value);
+
+        // But in slots fallback mode without an aggregate Prometheus rate, partial rate is reported as approx:
+        var metricsOffline = new MetricSnapshot
+        {
+            Timestamp = DateTimeOffset.UtcNow,
+            State = ConnectionState.Limited,
+            Kind = BackendKind.LlamaCpp,
+            GenerationTokPerSec = MetricValue<double>.None,
+        };
+        var combinedFallback = LlamaCppAdapter.WithRequests(metricsOffline, requests);
+        Assert.Equal(60.0, combinedFallback.GenerationTokPerSec.Value);
+        Assert.Equal(MetricQuality.Approximate, combinedFallback.GenerationTokPerSec.Quality);
+    }
+
+    [Fact]
+    public async Task Llama_Router_Mode_Identified_And_Queries_Model_Specific_Endpoints()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["metrics"] = (400, "model is required in router mode"),
+            ["slots"] = (400, "model is required"),
+            ["v1/models"] = (200, """{"object":"list","data":[{"id":"qwen-7b"},{"id":"deepseek-7b"}]}"""),
+            ["metrics?model=qwen-7b"] = (200, "llamacpp:prompt_tokens_total 100\n"),
+            ["slots?model=qwen-7b"] = (200, "[]"),
+            ["props?model=qwen-7b"] = (200, """{"total_slots":2,"model_path":"/models/qwen.gguf"}"""),
+        };
+        var http = new FakeHttp(new Uri("http://x/"), routes);
+
+        var fp = await MakeFingerprinter(routes).FingerprintAsync(http.BaseUrl, default);
+        Assert.Equal(BackendKind.LlamaCpp, fp.Kind);
+        Assert.Contains("router mode", fp.Evidence);
+
+        // Model-scoped adapter queries model-specific endpoints
+        var scopedAdapter = new LlamaCppAdapter("qwen-7b");
+        var snap = await scopedAdapter.CollectAsync(http, default);
+        Assert.NotEqual(ConnectionState.Offline, snap.State);
+        Assert.Equal("qwen.gguf", snap.ModelName);
+        Assert.Contains("metrics?model=qwen-7b", http.Requests);
+        Assert.Contains("slots?model=qwen-7b", http.Requests);
+    }
+
+    [Fact]
+    public async Task Vllm_Aggregates_Multi_Engine_Gauges_And_Counters()
+    {
+        const string metricsBody = """
+            vllm:num_requests_running{model_name="qwen",engine="0"} 3
+            vllm:num_requests_running{model_name="qwen",engine="1"} 4
+            vllm:num_requests_waiting{model_name="qwen",engine="0"} 1
+            vllm:num_requests_waiting{model_name="qwen",engine="1"} 2
+            vllm:kv_cache_usage_perc{model_name="qwen",engine="0"} 0.50
+            vllm:kv_cache_usage_perc{model_name="qwen",engine="1"} 0.70
+            vllm:prompt_tokens_total{model_name="qwen",engine="0"} 1000
+            vllm:prompt_tokens_total{model_name="qwen",engine="1"} 2000
+            vllm:generation_tokens_total{model_name="qwen",engine="0"} 300
+            vllm:generation_tokens_total{model_name="qwen",engine="1"} 400
+            """;
+        var http = new FakeHttp(new Uri("http://x/"), new Dictionary<string, (int, string)>
+        {
+            ["metrics"] = (200, metricsBody),
+        });
+
+        var snap = await new VllmAdapter().CollectAsync(http, default);
+
+        Assert.Equal(7, snap.Running.Value); // sum across engines (3 + 4)
+        Assert.Equal(3, snap.Queued.Value);  // sum across engines (1 + 2)
+        Assert.Equal(0.60, snap.KvCacheUsage.Value, 2); // average across engines (0.50 + 0.70) / 2
+        Assert.Equal(3000, snap.PrefilledTokensTotal.Value); // 1000 + 2000
+        Assert.Equal(700, snap.GeneratedTokensTotal.Value);   // 300 + 400
+    }
+
+    [Fact]
+    public async Task LmStudio_V1_Wins_Over_V0_When_Both_Respond()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["api/v1/models"] = (200, """
+                {"models":[{"type":"llm","key":"google/gemma","display_name":"Gemma",
+                  "loaded_instances":[{"id":"google/gemma","config":{"context_length":4096}}]}]}
+                """),
+            ["api/v0/models"] = (200, """
+                {"object":"list","data":[{"id":"gemma-legacy","object":"model","state":"loaded","max_context_length":32768}]}
+                """),
+        };
+        var http = new FakeHttp(new Uri("http://x/"), routes);
+        var adapter = new LmStudioAdapter();
+
+        var fp = await adapter.IdentifyAsync(http, default);
+        Assert.NotNull(fp);
+        Assert.Contains("/api/v1/models", fp!.Evidence);
+
+        var snap = await adapter.CollectAsync(http, default);
+        Assert.Equal("REST API v1", snap.Info["API"]);
+        Assert.Equal("google/gemma", snap.ModelName);
+    }
+
+    [Fact]
+    public async Task LmStudio_V0_Accepted_As_Fallback()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["api/v1/models"] = (404, ""),
+            ["api/v0/models"] = (200, """
+                {"object":"list","data":[{"id":"gemma-legacy","object":"model","state":"loaded","max_context_length":32768}]}
+                """),
+        };
+        var http = new FakeHttp(new Uri("http://x/"), routes);
+        var adapter = new LmStudioAdapter();
+
+        var fp = await adapter.IdentifyAsync(http, default);
+        Assert.NotNull(fp);
+        Assert.Contains("/api/v0/models", fp!.Evidence);
+
+        var snap = await adapter.CollectAsync(http, default);
+        Assert.Equal("REST API v0", snap.Info["API"]);
+        Assert.Equal("gemma-legacy", snap.ModelName);
+    }
+
+    [Fact]
+    public async Task LmStudio_Reports_Loaded_Instance_Context_Length_Not_Max_Context_Length()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["api/v1/models"] = (200, """
+                {
+                  "models": [
+                    {
+                      "type": "llm",
+                      "key": "google/gemma",
+                      "display_name": "Gemma",
+                      "max_context_length": 262144,
+                      "loaded_instances": [
+                        {
+                          "id": "instance-1",
+                          "config": {
+                            "context_length": 4096
+                          }
+                        }
+                      ]
+                    }
+                  ]
+                }
+                """),
+        };
+        var http = new FakeHttp(new Uri("http://x/"), routes);
+        var snap = await new LmStudioAdapter().CollectAsync(http, default);
+
+        Assert.Equal("google/gemma", snap.ModelName);
+        Assert.Equal("4096", snap.Info["google/gemma ctx"]);
+        Assert.False(snap.Info.ContainsKey("google/gemma max ctx"));
+    }
+
+    [Fact]
+    public async Task LmStudio_V0_Labels_Max_Context_Length_Clearly()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["api/v1/models"] = (404, ""),
+            ["api/v0/models"] = (200, """
+                {"object":"list","data":[{"id":"gemma-4-26b","object":"model","state":"loaded","max_context_length":32768}]}
+                """),
+        };
+        var http = new FakeHttp(new Uri("http://x/"), routes);
+        var snap = await new LmStudioAdapter().CollectAsync(http, default);
+
+        Assert.Equal("32768", snap.Info["gemma-4-26b max ctx"]);
+        Assert.False(snap.Info.ContainsKey("gemma-4-26b ctx"));
+    }
+
+    [Fact]
+    public async Task LmStudio_Missing_Status_Endpoint_Not_Hit_Every_Poll()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["api/v0/status"] = (404, "not found"),
+            ["api/v1/models"] = (200, """{"models":[]}"""),
+        };
+        var http = new FakeHttp(new Uri("http://x/"), routes);
+        var adapter = new LmStudioAdapter();
+
+        await adapter.CollectAsync(http, default);
+        Assert.Equal(1, http.Requests.Count(r => r == "api/v0/status"));
+
+        await adapter.CollectAsync(http, default);
+        // Second poll must NOT query api/v0/status again
+        Assert.Equal(1, http.Requests.Count(r => r == "api/v0/status"));
+    }
+
+    [Fact]
+    public async Task Bearer_Authentication_Attached_When_Configured_And_Absent_Otherwise()
+    {
+        HttpRequestMessage? capturedWithAuth = null;
+        HttpRequestMessage? capturedWithoutAuth = null;
+
+        var handlerWithAuth = new TestCaptureHandler(req => capturedWithAuth = req);
+        using var clientWithAuth = new HttpClient(handlerWithAuth)
+        {
+            DefaultRequestHeaders = { { "User-Agent", "LLMMeter/1.0" } }
+        };
+        clientWithAuth.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", "secret-token-123");
+
+        await clientWithAuth.GetAsync("http://127.0.0.1:1234/test");
+        Assert.NotNull(capturedWithAuth);
+        Assert.Equal("Bearer", capturedWithAuth!.Headers.Authorization?.Scheme);
+        Assert.Equal("secret-token-123", capturedWithAuth.Headers.Authorization?.Parameter);
+
+        var handlerWithoutAuth = new TestCaptureHandler(req => capturedWithoutAuth = req);
+        using var clientWithoutAuth = new HttpClient(handlerWithoutAuth)
+        {
+            DefaultRequestHeaders = { { "User-Agent", "LLMMeter/1.0" } }
+        };
+        await clientWithoutAuth.GetAsync("http://127.0.0.1:1234/test");
+        Assert.NotNull(capturedWithoutAuth);
+        Assert.Null(capturedWithoutAuth!.Headers.Authorization);
+    }
+
+    private sealed class TestCaptureHandler(Action<HttpRequestMessage> onSend) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            onSend(request);
+            return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent("{}")
+            });
+        }
     }
 }

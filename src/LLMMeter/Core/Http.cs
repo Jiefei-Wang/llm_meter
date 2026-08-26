@@ -36,12 +36,12 @@ public sealed class HttpService : IHttp, IDisposable
 {
     private readonly HttpClient _client;
 
-    public static HttpService Create(Uri baseUrl, TimeSpan timeout)
-        => CreateOwning(baseUrl, timeout);
+    public static HttpService Create(Uri baseUrl, TimeSpan timeout, string? authToken = null)
+        => CreateOwning(baseUrl, timeout, authToken);
 
-    public static HttpService CreateOwning(Uri baseUrl, TimeSpan timeout)
+    public static HttpService CreateOwning(Uri baseUrl, TimeSpan timeout, string? authToken = null)
     {
-        var client = SharedClientFactory.Create();
+        var client = SharedClientFactory.Create(authToken);
         client.Timeout = timeout;
         return new HttpService(baseUrl, client);
     }
@@ -102,10 +102,19 @@ public static class SharedClientFactory
             AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate,
         });
 
-    public static HttpClient Create() => new(Handler.Value, disposeHandler: false)
+    public static HttpClient Create(string? authToken = null)
     {
-        DefaultRequestHeaders = { { "User-Agent", "LLMMeter/1.0" } },
-    };
+        var client = new HttpClient(Handler.Value, disposeHandler: false)
+        {
+            DefaultRequestHeaders = { { "User-Agent", "LLMMeter/1.0" } },
+        };
+        if (!string.IsNullOrWhiteSpace(authToken))
+        {
+            client.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", authToken.Trim());
+        }
+        return client;
+    }
 }
 
 /// <summary>Monotonic clock helper.</summary>
