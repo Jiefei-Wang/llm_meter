@@ -48,6 +48,7 @@ public sealed class BackendCollector : IDisposable
     public EndpointRef Endpoint => _endpoint;
     public string? ModelId { get; }
     public BackendKind? KnownKind { get; private set; }
+    public BackendKind EffectiveKind => _adapter?.Kind ?? KnownKind ?? BackendKind.Unknown;
     public MetricSnapshot? Latest => Volatile.Read(ref _latest);
     public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
@@ -151,10 +152,23 @@ public sealed class BackendCollector : IDisposable
         }
     }
 
-    private void Publish(MetricSnapshot s)
+    internal void Publish(MetricSnapshot s)
     {
         Volatile.Write(ref _latest, s);
-        SnapshotUpdated?.Invoke(s);
+        var handler = SnapshotUpdated;
+        if (handler is null) return;
+
+        foreach (var invocation in handler.GetInvocationList())
+        {
+            try
+            {
+                ((Action<MetricSnapshot>)invocation).Invoke(s);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"subscriber exception ignored during snapshot update: {ex.Message}");
+            }
+        }
     }
 
     public void Dispose()

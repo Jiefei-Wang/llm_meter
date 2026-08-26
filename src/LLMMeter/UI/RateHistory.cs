@@ -24,10 +24,12 @@ internal sealed class RateHistory
     {
         lock (_lock)
         {
-            Enqueue(_prefill, new ActivityPoint(snapshot.Timestamp,
-                snapshot.PrefillTokPerSec.HasValue ? snapshot.PrefillTokPerSec.Value : null));
-            Enqueue(_generate, new ActivityPoint(snapshot.Timestamp,
-                snapshot.GenerationTokPerSec.HasValue ? snapshot.GenerationTokPerSec.Value : null));
+            double? prefill = snapshot.PrefillTokPerSec.HasValue && double.IsFinite(snapshot.PrefillTokPerSec.Value)
+                ? snapshot.PrefillTokPerSec.Value : null;
+            double? gen = snapshot.GenerationTokPerSec.HasValue && double.IsFinite(snapshot.GenerationTokPerSec.Value)
+                ? snapshot.GenerationTokPerSec.Value : null;
+            Enqueue(_prefill, new ActivityPoint(snapshot.Timestamp, prefill));
+            Enqueue(_generate, new ActivityPoint(snapshot.Timestamp, gen));
             Prune(_prefill, snapshot.Timestamp - Window);
             Prune(_generate, snapshot.Timestamp - Window);
         }

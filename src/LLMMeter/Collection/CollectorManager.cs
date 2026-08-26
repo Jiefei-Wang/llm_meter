@@ -14,20 +14,37 @@ public sealed class CollectorManager : IDisposable
     public BackendCollector GetOrAdd(EndpointRef endpoint, BackendKind? knownKind, string? modelId = null)
     {
         string key = CollectorKey(endpoint, modelId);
+        BackendCollector? toDispose = null;
         lock (_lock)
         {
-            if (_collectors.TryGetValue(key, out var existing))
+            if (_collectors.TryGetValue(key, out var existing) && !existing.IsDisposed)
             {
-                if (!string.Equals(existing.Endpoint.AuthToken, endpoint.AuthToken, StringComparison.Ordinal))
+                var currentKind = existing.EffectiveKind;
+                var targetKind = knownKind ?? BackendKind.Unknown;
+
+                // Check if the backend kind changed to an incompatible kind.
+                // Do not downgrade a known specific backend to Unknown.
+                bool needsReplacement = targetKind != BackendKind.Unknown &&
+                    ((currentKind == BackendKind.Unknown) || (currentKind != targetKind));
+
+                if (!needsReplacement)
                 {
-                    existing.Reconfigure(endpoint);
+                    if (!string.Equals(existing.Endpoint.AuthToken, endpoint.AuthToken, StringComparison.Ordinal))
+                    {
+                        existing.Reconfigure(endpoint);
+                    }
+                    return existing;
                 }
-                return existing;
+
+                toDispose = existing;
+                _collectors.Remove(key);
             }
 
             var collector = new BackendCollector(endpoint, knownKind, modelId);
             _collectors[key] = collector;
             collector.Start();
+
+            toDispose?.Dispose();
             return collector;
         }
     }

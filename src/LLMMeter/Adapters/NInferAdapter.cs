@@ -134,11 +134,15 @@ public sealed class NInferAdapter : IBackendAdapter, IDisposable
 
         if (hasTelemetry)
         {
-            // Check for stale telemetry (e.g. > 30 seconds or 4x stats interval without events)
+            // Check for stale telemetry (e.g. > 30 seconds or 4x stats interval without events).
+            // Telemetry is considered stale only if an active workload exists (_reader.IsIdle is false)
+            // and telemetry genuinely stops advancing for longer than the stale threshold.
+            // Normal idle silence is healthy and remains Online.
             double statsInterval = Math.Max(5.0, _reader.LastIntervalSeconds);
             double staleThresholdSeconds = Math.Max(30.0, statsInterval * 4);
             long elapsedTicks = now - _reader.LastEventTicks;
-            bool isStale = _reader.LastEventTicks > 0 && elapsedTicks > Stopwatch.Frequency * staleThresholdSeconds;
+            bool isIdle = _reader.IsIdle;
+            bool isStale = !isIdle && _reader.LastEventTicks > 0 && elapsedTicks > Stopwatch.Frequency * staleThresholdSeconds;
 
             if (isStale)
             {

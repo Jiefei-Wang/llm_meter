@@ -160,37 +160,17 @@ public sealed class LlamaCppAdapter : IBackendAdapter
         {
             if (models.Value.ValueKind == JsonValueKind.Array)
             {
-                foreach (var item in models.Value.EnumerateArray())
-                {
-                    if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("id", out var id) &&
-                        id.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(id.GetString()))
-                    {
-                        string status = item.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.String
-                            ? st.GetString() ?? "loaded" : "loaded";
-                        list.Add(new LlamaRouterModel(id.GetString()!, status));
-                    }
-                    else if (item.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(item.GetString()))
-                    {
-                        list.Add(new LlamaRouterModel(item.GetString()!, "loaded"));
-                    }
-                }
+                ParseModelArray(models.Value, list);
             }
-            else if (models.Value.ValueKind == JsonValueKind.Object &&
-                     models.Value.TryGetProperty("models", out var inner) && inner.ValueKind == JsonValueKind.Array)
+            else if (models.Value.ValueKind == JsonValueKind.Object)
             {
-                foreach (var item in inner.EnumerateArray())
+                if (models.Value.TryGetProperty("models", out var innerModels) && innerModels.ValueKind == JsonValueKind.Array)
                 {
-                    if (item.ValueKind == JsonValueKind.Object)
-                    {
-                        string? name = item.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String ? n.GetString() : null;
-                        name ??= item.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;
-                        if (!string.IsNullOrWhiteSpace(name))
-                        {
-                            string status = item.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.String
-                                ? st.GetString() ?? "loaded" : "loaded";
-                            list.Add(new LlamaRouterModel(name, status));
-                        }
-                    }
+                    ParseModelArray(innerModels, list);
+                }
+                else if (models.Value.TryGetProperty("data", out var innerData) && innerData.ValueKind == JsonValueKind.Array)
+                {
+                    ParseModelArray(innerData, list);
                 }
             }
         }
@@ -201,19 +181,62 @@ public sealed class LlamaCppAdapter : IBackendAdapter
         if (v1.HasValue && v1.Value.ValueKind == JsonValueKind.Object &&
             v1.Value.TryGetProperty("data", out var data) && data.ValueKind == JsonValueKind.Array)
         {
-            foreach (var item in data.EnumerateArray())
-            {
-                if (item.ValueKind == JsonValueKind.Object && item.TryGetProperty("id", out var id) &&
-                    id.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(id.GetString()))
-                {
-                    string status = item.TryGetProperty("status", out var st) && st.ValueKind == JsonValueKind.String
-                        ? st.GetString() ?? "loaded" : "loaded";
-                    list.Add(new LlamaRouterModel(id.GetString()!, status));
-                }
-            }
+            ParseModelArray(data, list);
         }
 
         return list;
+    }
+
+    private static void ParseModelArray(JsonElement array, List<LlamaRouterModel> list)
+    {
+        if (array.ValueKind != JsonValueKind.Array) return;
+        foreach (var item in array.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(item.GetString()))
+            {
+                list.Add(new LlamaRouterModel(item.GetString()!, "loaded"));
+            }
+            else if (item.ValueKind == JsonValueKind.Object)
+            {
+                string? id = item.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String
+                    ? idEl.GetString()
+                    : (item.TryGetProperty("name", out var nEl) && nEl.ValueKind == JsonValueKind.String ? nEl.GetString() : null);
+
+                if (!string.IsNullOrWhiteSpace(id))
+                {
+                    string status = ParseStatus(item);
+                    list.Add(new LlamaRouterModel(id, status));
+                }
+            }
+        }
+    }
+
+    private static string ParseStatus(JsonElement item)
+    {
+        if (!item.TryGetProperty("status", out var st))
+        {
+            // Backward compatibility: schemas with no status information at all assume loaded
+            return "loaded";
+        }
+
+        if (st.ValueKind == JsonValueKind.String)
+        {
+            var s = st.GetString()?.Trim();
+            return string.IsNullOrEmpty(s) ? "unknown" : s;
+        }
+
+        if (st.ValueKind == JsonValueKind.Object)
+        {
+            if (st.TryGetProperty("value", out var val) && val.ValueKind == JsonValueKind.String)
+            {
+                var s = val.GetString()?.Trim();
+                return string.IsNullOrEmpty(s) ? "unknown" : s;
+            }
+            // Explicitly present status object without a valid string value: do NOT claim loaded
+            return "unknown";
+        }
+
+        return "unknown";
     }
 
     internal static async Task<List<string>> EnumerateModelsAsync(IHttp http, CancellationToken ct)
@@ -447,7 +470,7 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             double sum = 0; bool any = false;
             foreach (var s in samples)
                 foreach (var n in names)
-                    if (s.Name == n) { sum += s.Value; any = true; break; }
+                    if (s.Name == n && double.IsFinite(s.Value)) { sum += s.Value; any = true; break; }
             return any ? sum : null;
         }
 
@@ -455,7 +478,7 @@ public sealed class LlamaCppAdapter : IBackendAdapter
         {
             foreach (var n in names)
                 foreach (var s in samples)
-                    if (s.Name == n) return s.Value;
+                    if (s.Name == n && double.IsFinite(s.Value)) return s.Value;
             return null;
         }
 
@@ -464,26 +487,30 @@ public sealed class LlamaCppAdapter : IBackendAdapter
         var prefillC = Sum(PrefillCounterNames);
         var genC = Sum(GenCounterNames);
 
-        var running = processing.HasValue
+        var running = processing.HasValue && double.IsFinite(processing.Value)
             ? MetricValue<int>.Exact((int)Math.Round(processing.Value), MetricSource.NativeMetrics, "llamacpp:requests_processing")
             : MetricValue<int>.None;
-        var queued = deferred.HasValue
+        var queued = deferred.HasValue && double.IsFinite(deferred.Value)
             ? MetricValue<int>.Exact((int)Math.Round(deferred.Value), MetricSource.NativeMetrics, "llamacpp:requests_deferred")
             : MetricValue<int>.None;
 
-        var prefillRate = prefillC.HasValue ? _prefill.Update(prefillC.Value, now) : MetricValue<double>.None;
+        var prefillRate = prefillC.HasValue && double.IsFinite(prefillC.Value)
+            ? _prefill.Update(prefillC.Value, now)
+            : MetricValue<double>.None;
         if (!prefillRate.HasValue)
         {
             var pGauge = First(PrefillGaugeNames);
-            if (pGauge.HasValue)
+            if (pGauge.HasValue && double.IsFinite(pGauge.Value))
                 prefillRate = MetricValue<double>.Exact(pGauge.Value, MetricSource.NativeMetrics, "llamacpp:prompt_tokens_seconds");
         }
 
-        var genRate = genC.HasValue ? _gen.Update(genC.Value, now) : MetricValue<double>.None;
+        var genRate = genC.HasValue && double.IsFinite(genC.Value)
+            ? _gen.Update(genC.Value, now)
+            : MetricValue<double>.None;
         if (!genRate.HasValue)
         {
             var gGauge = First(GenGaugeNames);
-            if (gGauge.HasValue)
+            if (gGauge.HasValue && double.IsFinite(gGauge.Value))
                 genRate = MetricValue<double>.Exact(gGauge.Value, MetricSource.NativeMetrics, "llamacpp:predicted_tokens_seconds");
         }
 
@@ -508,10 +535,10 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             GenerationTokPerSec = genRate,
             KvCacheUsage = kv,
             RecentTtftMs = MetricValue<double>.None,
-            GeneratedTokensTotal = genC.HasValue
+            GeneratedTokensTotal = genC.HasValue && double.IsFinite(genC.Value)
                 ? MetricValue<long>.Approx((long)genC.Value, MetricSource.NativeMetrics, "llamacpp:tokens_predicted_total")
                 : MetricValue<long>.None,
-            PrefilledTokensTotal = prefillC.HasValue
+            PrefilledTokensTotal = prefillC.HasValue && double.IsFinite(prefillC.Value)
                 ? MetricValue<long>.Approx((long)prefillC.Value, MetricSource.NativeMetrics, "llamacpp:prompt_tokens_total")
                 : MetricValue<long>.None,
             Requests = null,

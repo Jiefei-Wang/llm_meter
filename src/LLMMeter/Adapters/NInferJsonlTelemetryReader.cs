@@ -99,6 +99,40 @@ public sealed class NInferJsonlTelemetryReader : IDisposable
         get { lock (_lock) return _activeRequests.Count; }
     }
 
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct BY_HANDLE_FILE_INFORMATION
+    {
+        public uint dwFileAttributes;
+        public long ftCreationTime;
+        public long ftLastAccessTime;
+        public long ftLastWriteTime;
+        public uint dwVolumeSerialNumber;
+        public uint nFileSizeHigh;
+        public uint nFileSizeLow;
+        public uint nNumberOfLinks;
+        public uint nFileIndexHigh;
+        public uint nFileIndexLow;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetFileInformationByHandle(
+        Microsoft.Win32.SafeHandles.SafeFileHandle hFile,
+        out BY_HANDLE_FILE_INFORMATION lpFileInformation);
+
+    private (uint Volume, ulong FileIndex)? _trackedFileId;
+    private DateTime? _trackedCreationTime;
+    private byte[]? _trackedHeaderBytes;
+
+    public bool HasValidTelemetry
+    {
+        get { lock (_lock) return _hasThroughputBaseline || _serverInfo.Count > 0 || _serverInstanceId != null || _cumulativeGenerated > 0 || _cumulativePrefilled > 0; }
+    }
+
+    public bool IsIdle
+    {
+        get { lock (_lock) return HasValidTelemetry && _activeRequests.Count == 0 && (_running == 0 || _running == null); }
+    }
+
     /// <summary>
     /// Reads newly appended bytes from the telemetry file and updates runtime state.
     /// Returns true if valid telemetry has been observed for the current server instance.
@@ -116,16 +150,76 @@ public sealed class NInferJsonlTelemetryReader : IDisposable
             {
                 using var fs = new FileStream(_filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
 
-                // Detect truncation
+                // Detect file replacement/rotation:
+                // 1. File index / volume on Windows
+                // 2. Creation time
+                // 3. Header prefix bytes (first up to 256 bytes)
+                // 4. File truncation (fs.Length < _offset)
+                byte[] currentHeader = new byte[256];
+                int headerLen = fs.Read(currentHeader, 0, currentHeader.Length);
+
+                (uint Volume, ulong FileIndex)? currentFileId = null;
+                if (OperatingSystem.IsWindows())
+                {
+                    if (GetFileInformationByHandle(fs.SafeFileHandle, out var info))
+                    {
+                        ulong idx = ((ulong)info.nFileIndexHigh << 32) | info.nFileIndexLow;
+                        currentFileId = (info.dwVolumeSerialNumber, idx);
+                    }
+                }
+                DateTime currentCreationTime = File.GetCreationTimeUtc(_filePath);
+
+                bool isReplaced = false;
                 if (fs.Length < _offset)
                 {
+                    isReplaced = true;
+                }
+                else if (_trackedFileId.HasValue && currentFileId.HasValue &&
+                         (_trackedFileId.Value.Volume != currentFileId.Value.Volume ||
+                          _trackedFileId.Value.FileIndex != currentFileId.Value.FileIndex))
+                {
+                    isReplaced = true;
+                }
+                else if (!currentFileId.HasValue && _trackedCreationTime.HasValue &&
+                         currentCreationTime != _trackedCreationTime.Value)
+                {
+                    isReplaced = true;
+                }
+                else if (_trackedHeaderBytes is not null)
+                {
+                    int compareLen = Math.Min(_trackedHeaderBytes.Length, headerLen);
+                    if (headerLen < _trackedHeaderBytes.Length && fs.Length <= _trackedHeaderBytes.Length)
+                    {
+                        isReplaced = true;
+                    }
+                    else if (!currentHeader.AsSpan(0, compareLen).SequenceEqual(_trackedHeaderBytes.AsSpan(0, compareLen)))
+                    {
+                        isReplaced = true;
+                    }
+                }
+
+                if (isReplaced)
+                {
                     Reset();
+                }
+
+                _trackedFileId = currentFileId;
+                _trackedCreationTime = currentCreationTime;
+                if (_trackedHeaderBytes is null || isReplaced)
+                {
+                    _trackedHeaderBytes = new byte[headerLen];
+                    Array.Copy(currentHeader, _trackedHeaderBytes, headerLen);
+                }
+                else if (headerLen > _trackedHeaderBytes.Length && _trackedHeaderBytes.Length < 256)
+                {
+                    _trackedHeaderBytes = new byte[headerLen];
+                    Array.Copy(currentHeader, _trackedHeaderBytes, headerLen);
                 }
 
                 if (fs.Length == _offset)
                 {
                     // No new bytes
-                    return _hasThroughputBaseline || _activeRequests.Count > 0 || _serverInfo.Count > 0;
+                    return HasValidTelemetry || _activeRequests.Count > 0;
                 }
 
                 fs.Seek(_offset, SeekOrigin.Begin);
@@ -136,7 +230,7 @@ public sealed class NInferJsonlTelemetryReader : IDisposable
 
                 if (string.IsNullOrEmpty(chunk))
                 {
-                    return _hasThroughputBaseline || _activeRequests.Count > 0 || _serverInfo.Count > 0;
+                    return HasValidTelemetry || _activeRequests.Count > 0;
                 }
 
                 string fullText = _remainder + chunk;
@@ -147,7 +241,7 @@ public sealed class NInferJsonlTelemetryReader : IDisposable
                 {
                     // Incomplete single line; buffer until newline
                     _remainder = fullText;
-                    return _hasThroughputBaseline || _activeRequests.Count > 0 || _serverInfo.Count > 0;
+                    return HasValidTelemetry || _activeRequests.Count > 0;
                 }
 
                 string completeChunk = fullText[..(lastNewline + 1)];
@@ -165,7 +259,7 @@ public sealed class NInferJsonlTelemetryReader : IDisposable
                     ProcessLine(line, nowTicks);
                 }
 
-                return _hasThroughputBaseline || _activeRequests.Count > 0 || _serverInfo.Count > 0;
+                return HasValidTelemetry || _activeRequests.Count > 0;
             }
             catch (IOException)
             {
@@ -355,12 +449,21 @@ public sealed class NInferJsonlTelemetryReader : IDisposable
             _activeRequests.Remove(reqId);
         }
 
+        // When all active requests have finished, update running and rate counters to idle
+        if (_activeRequests.Count == 0)
+        {
+            _running = 0;
+            _queued = 0;
+            _prefillRate = 0.0;
+            _decodeRate = 0.0;
+        }
+
         // TTFT timing
         if (root.TryGetProperty("timings_seconds", out var timings) && timings.ValueKind == JsonValueKind.Object &&
             timings.TryGetProperty("ttft", out var ttftEl) && ttftEl.ValueKind == JsonValueKind.Number)
         {
             double ttftMs = ttftEl.GetDouble() * 1000.0;
-            if (ttftMs >= 0.0)
+            if (ttftMs >= 0.0 && double.IsFinite(ttftMs))
             {
                 if (_ttftSamples.Count >= 10) _ttftSamples.RemoveAt(0);
                 _ttftSamples.Add(ttftMs);
@@ -383,6 +486,13 @@ public sealed class NInferJsonlTelemetryReader : IDisposable
             req.TryGetProperty("request_id", out var idEl) && idEl.ValueKind == JsonValueKind.Number)
         {
             _activeRequests.Remove(idEl.GetInt64());
+            if (_activeRequests.Count == 0)
+            {
+                _running = 0;
+                _queued = 0;
+                _prefillRate = 0.0;
+                _decodeRate = 0.0;
+            }
         }
     }
 
@@ -393,17 +503,28 @@ public sealed class NInferJsonlTelemetryReader : IDisposable
     {
         lock (_lock)
         {
-            if (_running.HasValue)
-                builder.Running = MetricValue<int>.Exact(_running.Value, MetricSource.NativeApi);
+            bool isIdle = IsIdle;
+            if (isIdle)
+            {
+                builder.Running = MetricValue<int>.Exact(0, MetricSource.NativeApi);
+                builder.Queued = MetricValue<int>.Exact(0, MetricSource.NativeApi);
+                builder.PrefillTokPerSec = MetricValue<double>.Exact(0.0, MetricSource.Derived, "idle");
+                builder.GenerationTokPerSec = MetricValue<double>.Exact(0.0, MetricSource.Derived, "idle");
+            }
+            else
+            {
+                if (_running.HasValue)
+                    builder.Running = MetricValue<int>.Exact(_running.Value, MetricSource.NativeApi);
 
-            if (_queued.HasValue)
-                builder.Queued = MetricValue<int>.Exact(_queued.Value, MetricSource.NativeApi);
+                if (_queued.HasValue)
+                    builder.Queued = MetricValue<int>.Exact(_queued.Value, MetricSource.NativeApi);
 
-            if (_prefillRate.HasValue)
-                builder.PrefillTokPerSec = MetricValue<double>.Approx(_prefillRate.Value, MetricSource.Derived);
+                if (_prefillRate.HasValue && double.IsFinite(_prefillRate.Value))
+                    builder.PrefillTokPerSec = MetricValue<double>.Approx(_prefillRate.Value, MetricSource.Derived);
 
-            if (_decodeRate.HasValue)
-                builder.GenerationTokPerSec = MetricValue<double>.Approx(_decodeRate.Value, MetricSource.Derived);
+                if (_decodeRate.HasValue && double.IsFinite(_decodeRate.Value))
+                    builder.GenerationTokPerSec = MetricValue<double>.Approx(_decodeRate.Value, MetricSource.Derived);
+            }
 
             if (_hasThroughputBaseline)
             {
@@ -441,7 +562,7 @@ public sealed class NInferJsonlTelemetryReader : IDisposable
                 }
                 builder.Requests = rows;
             }
-            else if (_hasThroughputBaseline)
+            else if (_hasThroughputBaseline || HasValidTelemetry)
             {
                 builder.Requests = Array.Empty<RequestSnapshot>();
             }
@@ -484,6 +605,9 @@ public sealed class NInferJsonlTelemetryReader : IDisposable
             _specAcceptedTokens = 0;
             _specBackend = null;
             _specDraftWindow = 0;
+            _trackedFileId = null;
+            _trackedCreationTime = null;
+            _trackedHeaderBytes = null;
         }
     }
 

@@ -22,6 +22,7 @@ public sealed class VllmAdapter : IBackendAdapter
     private readonly RateCalculator _gen = new();
     private readonly RollingTtft _ttft = new(10);
     private string? _modelName;
+    internal Func<long> Clock = () => MonoClock.NowTicks;
 
     // Metric name aliases (vLLM renamed several metrics between versions).
     internal static readonly string[] RunningNames = ["vllm:num_requests_running"];
@@ -57,7 +58,7 @@ public sealed class VllmAdapter : IBackendAdapter
             {
                 double sum = 0; bool any = false;
                 foreach (var s in samples)
-                    if (s.Name == n) { sum += s.Value; any = true; }
+                    if (s.Name == n && double.IsFinite(s.Value)) { sum += s.Value; any = true; }
                 if (any) return sum;
             }
             return null;
@@ -69,7 +70,7 @@ public sealed class VllmAdapter : IBackendAdapter
             {
                 double sum = 0; int count = 0;
                 foreach (var s in samples)
-                    if (s.Name == n) { sum += s.Value; count++; }
+                    if (s.Name == n && double.IsFinite(s.Value)) { sum += s.Value; count++; }
                 if (count > 0) return sum / count;
             }
             return null;
@@ -78,7 +79,7 @@ public sealed class VllmAdapter : IBackendAdapter
         _modelName ??= samples.FirstOrDefault(s => s.TryGetLabel("model_name", out _)) is { } ms &&
                        ms.TryGetLabel("model_name", out var mn) ? mn : null;
 
-        var now = MonoClock.NowTicks;
+        var now = Clock();
 
         var runningV = Sum(RunningNames);
         var waitingV = Sum(WaitingNames);
@@ -87,7 +88,7 @@ public sealed class VllmAdapter : IBackendAdapter
         var genC = Sum(GenCounterNames);
 
         long? ttftCount = null; double? ttftSum = null;
-        if (Sum(TtftCountNames) is { } tc && Sum(TtftSumNames) is { } ts)
+        if (Sum(TtftCountNames) is { } tc && Sum(TtftSumNames) is { } ts && double.IsFinite(tc) && double.IsFinite(ts) && tc >= 0)
         {
             ttftCount = (long)tc;
             ttftSum = ts;
@@ -95,16 +96,26 @@ public sealed class VllmAdapter : IBackendAdapter
         if (ttftCount.HasValue && ttftSum.HasValue)
             _ttft.Observe(ttftCount.Value, ttftSum.Value, now);
 
-        var prefillRate = prefillC.HasValue ? _prefill.Update(prefillC.Value, now) : MetricValue<double>.None;
-        var genRate = genC.HasValue ? _gen.Update(genC.Value, now) : MetricValue<double>.None;
+        var prefillRate = prefillC.HasValue && double.IsFinite(prefillC.Value)
+            ? _prefill.Update(prefillC.Value, now)
+            : MetricValue<double>.None;
+        var genRate = genC.HasValue && double.IsFinite(genC.Value)
+            ? _gen.Update(genC.Value, now)
+            : MetricValue<double>.None;
 
-        var running = runningV.HasValue ? MetricValue<int>.Exact((int)Math.Round(runningV.Value), MetricSource.NativeMetrics, "/metrics gauge") : MetricValue<int>.None;
-        var queued = waitingV.HasValue ? MetricValue<int>.Exact((int)Math.Round(waitingV.Value), MetricSource.NativeMetrics, "/metrics gauge") : MetricValue<int>.None;
+        var running = runningV.HasValue && double.IsFinite(runningV.Value)
+            ? MetricValue<int>.Exact((int)Math.Round(runningV.Value), MetricSource.NativeMetrics, "/metrics gauge")
+            : MetricValue<int>.None;
+        var queued = waitingV.HasValue && double.IsFinite(waitingV.Value)
+            ? MetricValue<int>.Exact((int)Math.Round(waitingV.Value), MetricSource.NativeMetrics, "/metrics gauge")
+            : MetricValue<int>.None;
 
-        var kv = kvV.HasValue ? MetricValue<double>.Exact(Math.Clamp(kvV.Value, 0, 1), MetricSource.NativeMetrics) : MetricValue<double>.None;
+        var kv = kvV.HasValue && double.IsFinite(kvV.Value)
+            ? MetricValue<double>.Exact(Math.Clamp(kvV.Value, 0, 1), MetricSource.NativeMetrics)
+            : MetricValue<double>.None;
 
         var ttftAvg = _ttft.AverageSeconds();
-        MetricValue<double> ttft = ttftAvg.HasValue
+        MetricValue<double> ttft = ttftAvg.HasValue && double.IsFinite(ttftAvg.Value)
             ? (_ttft.IsExactEstimate()
                 ? MetricValue<double>.Exact(ttftAvg.Value * 1000.0, MetricSource.Derived, "rolling last-10 from TTFT histogram deltas")
                 : MetricValue<double>.Approx(ttftAvg.Value * 1000.0, MetricSource.Derived,
@@ -125,10 +136,10 @@ public sealed class VllmAdapter : IBackendAdapter
             GenerationTokPerSec = genRate,
             KvCacheUsage = kv,
             RecentTtftMs = ttft,
-            GeneratedTokensTotal = genC.HasValue
+            GeneratedTokensTotal = genC.HasValue && double.IsFinite(genC.Value)
                 ? MetricValue<long>.Exact((long)genC.Value, MetricSource.NativeMetrics, "vllm generation token counter")
                 : MetricValue<long>.None,
-            PrefilledTokensTotal = prefillC.HasValue
+            PrefilledTokensTotal = prefillC.HasValue && double.IsFinite(prefillC.Value)
                 ? MetricValue<long>.Exact((long)prefillC.Value, MetricSource.NativeMetrics, "vllm prompt token counter")
                 : MetricValue<long>.None,
             Requests = null, // /metrics does not enumerate active requests (see spec §27)

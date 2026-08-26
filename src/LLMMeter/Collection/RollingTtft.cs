@@ -25,6 +25,9 @@ public sealed class RollingTtft(int windowSize = 10)
 
     public void Observe(long totalCount, double totalSumSeconds, long stopwatchTicks)
     {
+        if (totalCount < 0 || !double.IsFinite(totalSumSeconds))
+            return;
+
         if (totalCount < _lastCount)
         {
             // Histogram reset (server restart).
@@ -49,6 +52,9 @@ public sealed class RollingTtft(int windowSize = 10)
 
     internal void Add(double deltaCount, double deltaSumSeconds)
     {
+        if (!double.IsFinite(deltaCount) || !double.IsFinite(deltaSumSeconds) || deltaCount <= 0 || deltaSumSeconds < 0)
+            return;
+
         _sawDataSinceReset = true;
         Push(deltaSumSeconds / deltaCount, deltaCount);
     }

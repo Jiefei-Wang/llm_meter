@@ -160,18 +160,65 @@ public sealed class BackendRegistry : IDisposable
 
     // ------------------------------------------------------------ discovered
 
-    private bool MergeDiscovered(IReadOnlyList<DiscoveredServer> servers)
+    internal bool MergeDiscovered(IReadOnlyList<DiscoveredServer> servers)
     {
         bool changed = false;
+        var toPruneDedupeKeys = new List<string>();
+
         lock (_lock)
         {
+            var newServerIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var s in servers)
             {
-                if (!_discovered.ContainsKey(s.Endpoint.Id))
+                newServerIds.Add(s.Endpoint.Id);
+                if (!_discovered.TryGetValue(s.Endpoint.Id, out var existing))
+                {
                     changed = true;
-                _discovered[s.Endpoint.Id] = s;
+                    _discovered[s.Endpoint.Id] = s;
+                }
+                else if (existing.Kind != s.Kind ||
+                         !string.Equals(existing.Endpoint.AuthToken, s.Endpoint.AuthToken, StringComparison.Ordinal) ||
+                         !string.Equals(existing.Endpoint.BaseUrl, s.Endpoint.BaseUrl) ||
+                         !string.Equals(existing.Evidence, s.Evidence, StringComparison.Ordinal))
+                {
+                    changed = true;
+                    _discovered[s.Endpoint.Id] = s;
+                }
+            }
+
+            var removedIds = _discovered.Keys
+                .Where(id => !newServerIds.Contains(id))
+                .ToList();
+
+            if (removedIds.Count > 0)
+            {
+                changed = true;
+                foreach (var id in removedIds)
+                {
+                    var removed = _discovered[id];
+                    _discovered.Remove(id);
+
+                    string dedupeKey = EndpointRef.NormalizeEndpointKey(removed.Endpoint.BaseUrl);
+
+                    // Check if dedupeKey is still needed by remaining discovered servers or manual endpoints
+                    bool stillInUse =
+                        _discovered.Values.Any(s => EndpointRef.NormalizeEndpointKey(s.Endpoint.BaseUrl).Equals(dedupeKey, StringComparison.OrdinalIgnoreCase)) ||
+                        _config.ManualBackends.Any(m => Uri.TryCreate(m.Url, UriKind.Absolute, out var u) &&
+                            EndpointRef.NormalizeEndpointKey(u).Equals(dedupeKey, StringComparison.OrdinalIgnoreCase));
+
+                    if (!stillInUse)
+                    {
+                        toPruneDedupeKeys.Add(dedupeKey);
+                    }
+                }
             }
         }
+
+        foreach (var dedupeKey in toPruneDedupeKeys)
+        {
+            Collectors.Remove(dedupeKey);
+        }
+
         return changed;
     }
 

@@ -13,6 +13,9 @@ public sealed class RateCalculator
 
     public MetricValue<double> Update(double counter, long stopwatchTicks)
     {
+        if (!double.IsFinite(counter))
+            return MetricValue<double>.None;
+
         if (_lastCounter.HasValue && counter < _lastCounter.Value - 1e-9)
         {
             _lastCounter = counter;

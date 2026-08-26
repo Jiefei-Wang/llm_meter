@@ -42,7 +42,7 @@ public sealed class ActivityChart : FrameworkElement
         const double right = 4;
         const double bottom = 2;
         var recent = Points.Where(p => p.Timestamp >= DateTimeOffset.Now - RateHistory.Window).ToArray();
-        var available = recent.Where(p => p.Value.HasValue).ToArray();
+        var available = recent.Where(p => p.Value.HasValue && double.IsFinite(p.Value.Value)).ToArray();
         double max = NiceScaleMaximum(available.Length == 0
             ? 0
             : available.Max(p => Math.Max(0, p.Value!.Value)));
@@ -81,7 +81,7 @@ public sealed class ActivityChart : FrameworkElement
             bool figureOpen = false;
             foreach (var point in recent)
             {
-                if (!point.Value.HasValue)
+                if (!point.Value.HasValue || !double.IsFinite(point.Value.Value))
                 {
                     figureOpen = false;
                     continue;
