@@ -44,9 +44,42 @@ public static class NInferPathHelper
             return BuildNInferWindowsTelemetryPath(port);
         }
 
-        // Manual or unspecified origin: check Windows location first, then Linux / default.
+        // Manual or unspecified origin: check Windows location first, then probe WSL distros.
         string winPath = BuildNInferWindowsTelemetryPath(port);
         if (File.Exists(winPath)) return winPath;
+
+        if (endpoint.BaseUrl.IsLoopback || endpoint.BaseUrl.Host is "127.0.0.1" or "localhost" or "::1")
+        {
+            try
+            {
+                string wslRoot = @"\\wsl.localhost";
+                if (Directory.Exists(wslRoot))
+                {
+                    foreach (var dir in Directory.GetDirectories(wslRoot))
+                    {
+                        string distro = Path.GetFileName(dir);
+                        string wslPath = BuildNInferWslTelemetryPath(distro, port);
+                        if (File.Exists(wslPath)) return wslPath;
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                string wslFallbackRoot = @"\\wsl$";
+                if (Directory.Exists(wslFallbackRoot))
+                {
+                    foreach (var dir in Directory.GetDirectories(wslFallbackRoot))
+                    {
+                        string distro = Path.GetFileName(dir);
+                        string wslPath = BuildNInferWslFallbackTelemetryPath(distro, port);
+                        if (File.Exists(wslPath)) return wslPath;
+                    }
+                }
+            }
+            catch { }
+        }
 
         return winPath;
     }

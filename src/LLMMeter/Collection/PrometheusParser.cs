@@ -20,7 +20,7 @@ public static class PrometheusParser
 
         foreach (var rawLine in text.Split('\n'))
         {
-            var line = rawLine.TrimEnd('\r');
+            var line = rawLine.Trim();
             if (string.IsNullOrWhiteSpace(line)) continue;
             if (line.StartsWith('#')) continue; // HELP/TYPE/comments ignored
 

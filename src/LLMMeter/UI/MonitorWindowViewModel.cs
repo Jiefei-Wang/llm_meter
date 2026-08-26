@@ -84,8 +84,10 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged, IDisposable
         };
     }
 
+    private Action? _releaseCollector;
+
     /// <summary>Attach to a collector (shared — no duplicate polling).</summary>
-    public void Bind(BackendCollector collector, BackendRegistry.TargetEntry entry)
+    public void Bind(BackendCollector collector, BackendRegistry.TargetEntry entry, Action? releaseCollector = null)
     {
         if (ReferenceEquals(_collector, collector))
         {
@@ -95,6 +97,8 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged, IDisposable
             return;
         }
         if (_collector != null) _collector.SnapshotUpdated -= OnSnapshotUpdated;
+        _releaseCollector?.Invoke();
+        _releaseCollector = releaseCollector;
         _collector = collector;
         _entry = entry;
         _history.Clear();
@@ -114,6 +118,8 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged, IDisposable
     public void Unbind()
     {
         if (_collector != null) _collector.SnapshotUpdated -= OnSnapshotUpdated;
+        _releaseCollector?.Invoke();
+        _releaseCollector = null;
         _collector = null;
         _entry = null;
         _lastRendered = null;
@@ -389,6 +395,8 @@ public sealed class MonitorWindowViewModel : INotifyPropertyChanged, IDisposable
     public void Dispose()
     {
         if (_collector != null) _collector.SnapshotUpdated -= OnSnapshotUpdated;
+        _releaseCollector?.Invoke();
+        _releaseCollector = null;
         _collector = null;
         _renderingActive = false;
         _requestStateTimer.Stop();

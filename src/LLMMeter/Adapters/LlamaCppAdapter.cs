@@ -295,25 +295,28 @@ public sealed class LlamaCppAdapter : IBackendAdapter
             }
         }
 
-        // Fetch these together. /metrics can be a relatively expensive scrape on
-        // a busy server, and waiting for it before /slots made the UI feel stale.
-        // /slots is also needed for the active-request rows: Prometheus only has
-        // aggregate request gauges.
-        var metricsTask = http.GetStringAsync(EndpointPath("metrics"), ct);
-        var slotsTask = http.GetJsonAsync(EndpointPath("slots"), ct);
-        await Task.WhenAll(metricsTask, slotsTask).ConfigureAwait(false);
-        var (status, body) = await metricsTask.ConfigureAwait(false);
-        var slots = await slotsTask.ConfigureAwait(false);
+        // Fetch /metrics first. When requests_processing is 0, we avoid polling
+        // /slots so llama-server can enter idle sleep without task resets.
+        var (status, body) = await http.GetStringAsync(EndpointPath("metrics"), ct).ConfigureAwait(false);
 
         // --- /metrics path
         if (status == 200 && body.Contains("llamacpp:", StringComparison.Ordinal))
         {
             _metricsEnabled = true;
-            _slotsAvailable = slots.HasValue && slots.Value.ValueKind == JsonValueKind.Array;
             var snapshot = CollectFromMetrics(body, info, now);
-            return _slotsAvailable
-                ? WithRequests(snapshot, CollectRequestRows(slots!.Value, now))
-                : snapshot;
+
+            int running = snapshot.Running.HasValue ? snapshot.Running.Value : 0;
+            if (running > 0)
+            {
+                var activeSlots = await http.GetJsonAsync(EndpointPath("slots"), ct).ConfigureAwait(false);
+                _slotsAvailable = activeSlots.HasValue && activeSlots.Value.ValueKind == JsonValueKind.Array;
+                return _slotsAvailable
+                    ? WithRequests(snapshot, CollectRequestRows(activeSlots!.Value, now))
+                    : snapshot;
+            }
+
+            _slotsAvailable = true;
+            return WithRequests(snapshot, Array.Empty<RequestSnapshot>());
         }
 
         // Check for router mode when not already scoped to a specific model
@@ -355,6 +358,7 @@ public sealed class LlamaCppAdapter : IBackendAdapter
 
 
         // --- /slots fallback
+        var slots = await http.GetJsonAsync(EndpointPath("slots"), ct).ConfigureAwait(false);
         _metricsEnabled = false;
         _slotsAvailable = slots.HasValue && slots.Value.ValueKind == JsonValueKind.Array;
         if (!slots.HasValue || slots.Value.ValueKind != JsonValueKind.Array)

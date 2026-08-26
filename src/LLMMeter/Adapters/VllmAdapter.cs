@@ -64,6 +64,14 @@ public sealed class VllmAdapter : IBackendAdapter
             return null;
         }
 
+        double? SumMetric(string name)
+        {
+            double sum = 0; bool any = false;
+            foreach (var s in samples)
+                if (s.Name == name && double.IsFinite(s.Value)) { sum += s.Value; any = true; }
+            return any ? sum : null;
+        }
+
         double? Average(string[] names)
         {
             foreach (var n in names)
@@ -76,13 +84,26 @@ public sealed class VllmAdapter : IBackendAdapter
             return null;
         }
 
-        _modelName ??= samples.FirstOrDefault(s => s.TryGetLabel("model_name", out _)) is { } ms &&
-                       ms.TryGetLabel("model_name", out var mn) ? mn : null;
+        // Recompute model name from current scrape so restarts/model changes are detected
+        var modelLabels = samples
+            .Where(s => s.TryGetLabel("model_name", out var mn) && !string.IsNullOrWhiteSpace(mn))
+            .Select(s => { s.TryGetLabel("model_name", out var mn); return mn!; })
+            .Distinct()
+            .ToList();
+        if (modelLabels.Count > 0)
+        {
+            _modelName = modelLabels[0];
+        }
 
         var now = Clock();
 
         var runningV = Sum(RunningNames);
-        var waitingV = Sum(WaitingNames);
+        // vLLM waiting requests and preempted swapped-out requests coexist; sum both for backlog
+        var waiting = SumMetric("vllm:num_requests_waiting");
+        var swapped = SumMetric("vllm:num_requests_swapped");
+        double? waitingV = (waiting.HasValue || swapped.HasValue)
+            ? (waiting ?? 0.0) + (swapped ?? 0.0)
+            : null;
         var kvV = Average(KvUsageNames);
         var prefillC = Sum(PrefillCounterNames);
         var genC = Sum(GenCounterNames);

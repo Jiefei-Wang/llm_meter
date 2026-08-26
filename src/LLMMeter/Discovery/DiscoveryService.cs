@@ -7,6 +7,26 @@ namespace LLMMeter.Discovery;
 
 public sealed record DiscoveredServer(EndpointRef Endpoint, BackendKind Kind, string Evidence);
 
+public sealed class DiscoveryScanResult
+{
+    public IReadOnlyList<DiscoveredServer> Servers { get; }
+    public bool WindowsScanned { get; }
+    public bool WslScanned { get; }
+    public IReadOnlySet<string> ScannedWslDistros { get; }
+
+    public DiscoveryScanResult(
+        IReadOnlyList<DiscoveredServer> servers,
+        bool windowsScanned = true,
+        bool wslScanned = true,
+        IReadOnlySet<string>? scannedWslDistros = null)
+    {
+        Servers = servers;
+        WindowsScanned = windowsScanned;
+        WslScanned = wslScanned;
+        ScannedWslDistros = scannedWslDistros ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    }
+}
+
 /// <summary>
 /// Automatic discovery: known local ports + Windows loopback listeners +
 /// running WSL distributions. Never scans the LAN. Fingerprinting decides
@@ -32,6 +52,7 @@ public sealed class DiscoveryService : IDisposable
     private readonly HashSet<string> _knownEndpointKeys = new(StringComparer.OrdinalIgnoreCase);
 
     public event Action<IReadOnlyList<DiscoveredServer>>? Updated;
+    public event Action<DiscoveryScanResult>? ScanCompleted;
 
     public DiscoveryService(DiscoveryConfig config) => _config = config;
 
@@ -62,8 +83,18 @@ public sealed class DiscoveryService : IDisposable
         await Task.Yield();
         try
         {
-            var result = await (_scanOverride?.Invoke(_cts.Token) ?? ScanOnceAsync(_cts.Token)).ConfigureAwait(false);
-            Updated?.Invoke(result);
+            DiscoveryScanResult scanResult;
+            if (_scanOverride != null)
+            {
+                var servers = await _scanOverride(_cts.Token).ConfigureAwait(false);
+                scanResult = new DiscoveryScanResult(servers);
+            }
+            else
+            {
+                scanResult = await ScanFullOnceAsync(_cts.Token).ConfigureAwait(false);
+            }
+            Updated?.Invoke(scanResult.Servers);
+            ScanCompleted?.Invoke(scanResult);
         }
         catch (OperationCanceledException) when (_cts.IsCancellationRequested) { }
         catch (Exception ex)
@@ -114,6 +145,16 @@ public sealed class DiscoveryService : IDisposable
 
     public async Task<IReadOnlyList<DiscoveredServer>> ScanOnceAsync(CancellationToken ct)
     {
+        var scan = await ScanFullOnceAsync(ct).ConfigureAwait(false);
+        return scan.Servers;
+    }
+
+    public async Task<DiscoveryScanResult> ScanFullOnceAsync(CancellationToken ct)
+    {
+        bool windowsScanned = true;
+        bool wslScanned = false;
+        var scannedDistros = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         var candidates = new List<(Uri url, string originLabel, OriginKind origin, string? distro, string evidenceHint)>();
 
         // 1. Known ports on 127.0.0.1
@@ -131,13 +172,12 @@ public sealed class DiscoveryService : IDisposable
                 var pidNames = GetProcessNameMap();
                 foreach (var l in WindowsProcessDiscovery.GetLoopbackListeners())
                 {
-                    // Known ports are already covered by step 1; this pass adds
-                    // recognized inference processes on any other port.
                     if (pidNames.TryGetValue(l.Pid, out var name) &&
                         WindowsProcessDiscovery.IsLikelyInferenceProcess(name))
                     {
+                        string host = l.Address == "[::1]" ? "[::1]" : "127.0.0.1";
                         candidates.Add((
-                            new Uri($"http://127.0.0.1:{l.Port}"),
+                            new Uri($"http://{host}:{l.Port}"),
                             "Windows", OriginKind.WindowsHost, null,
                             $"listener process: {name}.exe"));
                     }
@@ -155,8 +195,10 @@ public sealed class DiscoveryService : IDisposable
             try
             {
                 var wslServers = await WslDiscovery.ScanAsync(ct).ConfigureAwait(false);
+                wslScanned = true;
                 foreach (var d in wslServers)
                 {
+                    scannedDistros.Add(d.Name);
                     foreach (var p in d.ListeningPorts.Take(24))
                     {
                         candidates.Add((
@@ -175,13 +217,17 @@ public sealed class DiscoveryService : IDisposable
             }
             catch
             {
-                // WSL absent or failing — non-fatal
+                // WSL absent or failing — preserve existing WSL endpoints
+                wslScanned = false;
             }
         }
+        else
+        {
+            wslScanned = true;
+        }
 
-        // Dedupe URLs, skip known endpoints
-        var seenUrls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var toProbe = new List<(Uri url, string originLabel, OriginKind origin, string? distro, string hint)>();
+        // Dedupe candidates, merging hints
+        var candidateMap = new Dictionary<string, (Uri url, string originLabel, OriginKind origin, string? distro, string hint)>(StringComparer.OrdinalIgnoreCase);
         foreach (var c in candidates)
         {
             string key = c.origin switch
@@ -196,12 +242,29 @@ public sealed class DiscoveryService : IDisposable
                 if (c.origin == OriginKind.WindowsHost && _knownEndpointKeys.Contains(normKey)) continue;
             }
             string dedupeKey = $"{c.origin}|{c.distro}|{normKey}";
-            if (!seenUrls.Add(dedupeKey)) continue;
-            toProbe.Add(c);
+            if (candidateMap.TryGetValue(dedupeKey, out var existing))
+            {
+                string mergedHint;
+                if (c.evidenceHint.Contains("listener process:", StringComparison.OrdinalIgnoreCase))
+                    mergedHint = existing.hint.Contains("listener process:", StringComparison.OrdinalIgnoreCase)
+                        ? $"{existing.hint}; {c.evidenceHint}"
+                        : c.evidenceHint;
+                else if (existing.hint.Contains("listener process:", StringComparison.OrdinalIgnoreCase))
+                    mergedHint = existing.hint;
+                else
+                    mergedHint = $"{existing.hint}; {c.evidenceHint}";
+
+                candidateMap[dedupeKey] = (existing.url, existing.originLabel, existing.origin, existing.distro, mergedHint);
+            }
+            else
+            {
+                candidateMap[dedupeKey] = (c.url, c.originLabel, c.origin, c.distro, c.evidenceHint);
+            }
         }
 
+        var toProbe = candidateMap.Values.ToList();
         var results = await ProbeCandidatesAsync(toProbe, ct).ConfigureAwait(false);
-        return results;
+        return new DiscoveryScanResult(results, windowsScanned, wslScanned, scannedDistros);
     }
 
     private async Task<List<DiscoveredServer>> ProbeCandidatesAsync(
@@ -216,7 +279,9 @@ public sealed class DiscoveryService : IDisposable
                 await _probeGate.WaitAsync(ct).ConfigureAwait(false);
                 try
                 {
-                    var fp = await _fingerprinter.FingerprintAsync(c.url, ct).ConfigureAwait(false);
+                    string id = MakeId(c.origin, c.distro, c.url);
+                    var endpoint = new EndpointRef(id, c.url, c.origin, c.distro);
+                    var fp = await _fingerprinter.FingerprintAsync(endpoint, ct).ConfigureAwait(false);
                     var kind = fp.Kind;
                     if ((kind == BackendKind.GenericOpenAi || kind == BackendKind.Unknown) &&
                         (c.hint.Contains("ninfer-serve", StringComparison.OrdinalIgnoreCase) ||
@@ -226,8 +291,6 @@ public sealed class DiscoveryService : IDisposable
                     }
                     if (kind != BackendKind.Unknown)
                     {
-                        string id = MakeId(c.origin, c.distro, c.url);
-                        var endpoint = new EndpointRef(id, c.url, c.origin, c.distro);
                         found.Add(new DiscoveredServer(endpoint, kind, $"{c.hint}; {fp.Evidence}"));
                     }
 

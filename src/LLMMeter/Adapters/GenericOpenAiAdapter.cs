@@ -28,15 +28,25 @@ public sealed class GenericOpenAiAdapter : IBackendAdapter
         if (!models.HasValue || !LmStudioAdapter.LooksLikeGenericList(models.Value))
             return MetricSnapshot.Offline(Kind);
 
-        var loaded = new List<string>();
+        var catalog = new List<string>();
         string? first = null;
         foreach (var m in models.Value.GetProperty("data").EnumerateArray())
         {
             if (m.ValueKind == JsonValueKind.Object && m.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String)
             {
-                loaded.Add(id.GetString()!);
-                first ??= loaded[^1];
+                catalog.Add(id.GetString()!);
+                first ??= catalog[^1];
             }
+        }
+
+        var info = new Dictionary<string, string>
+        {
+            ["API"] = "/v1/models",
+            ["Catalog"] = $"{catalog.Count} models available",
+        };
+        if (catalog.Count > 0)
+        {
+            info["AvailableModels"] = string.Join(", ", catalog);
         }
 
         return new MetricSnapshot
@@ -46,8 +56,8 @@ public sealed class GenericOpenAiAdapter : IBackendAdapter
             Kind = Kind,
             Requests = null,
             ModelName = first,
-            LoadedModels = loaded,
-            Info = new Dictionary<string, string> { ["API"] = "/v1/models" },
+            LoadedModels = Array.Empty<string>(),
+            Info = info,
         };
     }
 

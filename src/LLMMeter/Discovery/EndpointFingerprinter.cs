@@ -28,12 +28,19 @@ public sealed class EndpointFingerprinter
         ];
     }
 
+    /// <summary>Identify the endpoint kind from an EndpointRef.</summary>
+    public Task<FingerprintResult> FingerprintAsync(EndpointRef endpoint, CancellationToken ct) =>
+        FingerprintAsync(endpoint.BaseUrl, endpoint.AuthToken, ct, endpoint);
+
     /// <summary>Identify the endpoint kind. Returns GenericOpenAi or Unknown.</summary>
     public Task<FingerprintResult> FingerprintAsync(Uri baseUrl, CancellationToken ct) =>
-        FingerprintAsync(baseUrl, null, ct);
+        FingerprintAsync(baseUrl, null, ct, null);
 
     /// <summary>Identify the endpoint kind using optional Bearer authentication.</summary>
-    public async Task<FingerprintResult> FingerprintAsync(Uri baseUrl, string? authToken, CancellationToken ct)
+    public Task<FingerprintResult> FingerprintAsync(Uri baseUrl, string? authToken, CancellationToken ct) =>
+        FingerprintAsync(baseUrl, authToken, ct, null);
+
+    public async Task<FingerprintResult> FingerprintAsync(Uri baseUrl, string? authToken, CancellationToken ct, EndpointRef? endpointRef)
     {
         using var inner = _httpFactory?.Invoke(baseUrl) ?? HttpService.CreateOwning(baseUrl, ProbeTimeout, authToken);
         using var http = new CachingHttp(inner);
@@ -41,7 +48,10 @@ public sealed class EndpointFingerprinter
         {
             try
             {
-                var res = await adapter.IdentifyAsync(http, ct).ConfigureAwait(false);
+                var adapterToUse = (adapter is NInferAdapter && endpointRef != null)
+                    ? new NInferAdapter(endpointRef)
+                    : adapter;
+                var res = await adapterToUse.IdentifyAsync(http, ct).ConfigureAwait(false);
                 if (res != null) return res;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)

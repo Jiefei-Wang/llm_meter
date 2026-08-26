@@ -479,7 +479,7 @@ public class FingerprintTests
             ["metrics"] = (400, "model is required in router mode"),
             ["slots"] = (400, "model is required"),
             ["v1/models"] = (200, """{"object":"list","data":[{"id":"qwen-7b"},{"id":"deepseek-7b"}]}"""),
-            ["metrics?model=qwen-7b&autoload=false"] = (200, "llamacpp:prompt_tokens_total 100\n"),
+            ["metrics?model=qwen-7b&autoload=false"] = (200, "llamacpp:prompt_tokens_total 100\nllamacpp:requests_processing 1\n"),
             ["slots?model=qwen-7b&autoload=false"] = (200, "[]"),
             ["props?model=qwen-7b&autoload=false"] = (200, """{"total_slots":2,"model_path":"/models/qwen.gguf"}"""),
         };

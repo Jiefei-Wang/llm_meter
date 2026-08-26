@@ -61,7 +61,7 @@ The aggregate prefill and generation cards use live active-slot progress, so the
 Every displayed value retains its source and quality:
 
 - **Exact** values come directly from a backend endpoint.
-- **Approximate** values are defensible derivations such as counter deltas, EMA-smoothed rates, or histogram changes.
+- **Approximate** values are defensible derivations such as direct counter deltas, live per-slot rates, or histogram changes.
 - **Unavailable** values are displayed as an em dash instead of being guessed or replaced with zero.
 
 Rates use a monotonic clock, handle counter resets, and do not report negative throughput. One collector is shared by all widgets monitoring the same endpoint.

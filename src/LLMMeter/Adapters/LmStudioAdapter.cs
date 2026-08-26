@@ -90,8 +90,10 @@ public sealed class LmStudioAdapter : IBackendAdapter
                 return MetricSnapshot.Offline(Kind);
         }
 
-        var loaded = new List<string>();
-        string? firstLoadedId = null;
+        var loadedLlms = new List<string>();
+        var loadedEmbeddings = new List<string>();
+        string? firstLlmId = null;
+        string? firstEmbeddingId = null;
 
         if (isV1)
         {
@@ -102,8 +104,22 @@ public sealed class LmStudioAdapter : IBackendAdapter
                     instances.GetArrayLength() == 0) continue;
                 string id = key.GetString() ?? "";
                 if (id.Length == 0) continue;
-                loaded.Add(id);
-                firstLoadedId ??= id;
+
+                string type = m.TryGetProperty("type", out var typeEl) && typeEl.ValueKind == JsonValueKind.String
+                    ? typeEl.GetString()?.ToLowerInvariant() ?? ""
+                    : "";
+
+                if (type == "embedding")
+                {
+                    loadedEmbeddings.Add(id);
+                    firstEmbeddingId ??= id;
+                }
+                else
+                {
+                    loadedLlms.Add(id);
+                    firstLlmId ??= id;
+                }
+
                 var instance = instances[0];
                 if (instance.ValueKind == JsonValueKind.Object && instance.TryGetProperty("config", out var config) &&
                     config.ValueKind == JsonValueKind.Object && config.TryGetProperty("context_length", out var ctx) &&
@@ -120,13 +136,32 @@ public sealed class LmStudioAdapter : IBackendAdapter
                 string state = m.TryGetProperty("state", out var st) && st.ValueKind == JsonValueKind.String ? st.GetString() ?? "" : "";
                 if (state == "loaded")
                 {
-                    loaded.Add(id);
-                    firstLoadedId ??= id;
+                    string type = m.TryGetProperty("type", out var typeEl) && typeEl.ValueKind == JsonValueKind.String
+                        ? typeEl.GetString()?.ToLowerInvariant() ?? ""
+                        : "";
+                    if (type == "embedding")
+                    {
+                        loadedEmbeddings.Add(id);
+                        firstEmbeddingId ??= id;
+                    }
+                    else
+                    {
+                        loadedLlms.Add(id);
+                        firstLlmId ??= id;
+                    }
                 }
                 if (state == "loaded" && m.TryGetProperty("max_context_length", out var mcl) && mcl.ValueKind == JsonValueKind.Number)
                     info[$"{id} max ctx"] = $"{mcl.GetInt64():0}";
             }
         }
+
+        if (loadedEmbeddings.Count > 0)
+        {
+            info["Embeddings"] = string.Join(", ", loadedEmbeddings);
+        }
+
+        string? primaryModel = firstLlmId ?? firstEmbeddingId;
+        var loadedList = loadedLlms.Count > 0 ? loadedLlms : loadedEmbeddings;
 
         info["API"] = isV1 ? "REST API v1" : "REST API v0";
 
@@ -142,8 +177,8 @@ public sealed class LmStudioAdapter : IBackendAdapter
             KvCacheUsage = MetricValue<double>.None,
             RecentTtftMs = MetricValue<double>.None,
             Requests = null,
-            ModelName = firstLoadedId,
-            LoadedModels = loaded,
+            ModelName = primaryModel,
+            LoadedModels = loadedList,
             Info = info,
         };
     }

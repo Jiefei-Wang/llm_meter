@@ -99,13 +99,30 @@ public sealed class NInferJsonlTelemetryReader : IDisposable
         get { lock (_lock) return _activeRequests.Count; }
     }
 
+    public long CumulativePrefilled
+    {
+        get { lock (_lock) return _cumulativePrefilled; }
+    }
+
+    public long CumulativeGenerated
+    {
+        get { lock (_lock) return _cumulativeGenerated; }
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct FILETIME
+    {
+        public uint dwLowDateTime;
+        public uint dwHighDateTime;
+    }
+
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     private struct BY_HANDLE_FILE_INFORMATION
     {
         public uint dwFileAttributes;
-        public long ftCreationTime;
-        public long ftLastAccessTime;
-        public long ftLastWriteTime;
+        public FILETIME ftCreationTime;
+        public FILETIME ftLastAccessTime;
+        public FILETIME ftLastWriteTime;
         public uint dwVolumeSerialNumber;
         public uint nFileSizeHigh;
         public uint nFileSizeLow;
@@ -292,8 +309,9 @@ public sealed class NInferJsonlTelemetryReader : IDisposable
                 string sid = sidEl.GetString() ?? "";
                 if (_serverInstanceId != null && !string.IsNullOrEmpty(sid) && !string.Equals(_serverInstanceId, sid, StringComparison.Ordinal))
                 {
-                    // Server restart with a new instance ID: re-initialize state
-                    Reset();
+                    // Server restart with a new instance ID inside the same append-only file:
+                    // re-initialize instance telemetry counters, but preserve file offset and cursor.
+                    ResetTelemetryState();
                 }
                 _serverInstanceId = sid;
             }
@@ -332,6 +350,10 @@ public sealed class NInferJsonlTelemetryReader : IDisposable
         {
             if (server.TryGetProperty("public_model_id", out var mid) && mid.ValueKind == JsonValueKind.String)
                 _publicModelId = mid.GetString();
+        }
+        else if (root.TryGetProperty("public_model_id", out var midTop) && midTop.ValueKind == JsonValueKind.String)
+        {
+            _publicModelId = midTop.GetString();
         }
 
         if (root.TryGetProperty("artifact", out var artifact) && artifact.ValueKind == JsonValueKind.Object)
@@ -581,12 +603,14 @@ public sealed class NInferJsonlTelemetryReader : IDisposable
         }
     }
 
-    public void Reset()
+    /// <summary>
+    /// Resets only the server instance telemetry state when a new server_instance_id is seen
+    /// in the same physical append-only log file. File offset, remainder, and file identity are preserved.
+    /// </summary>
+    public void ResetTelemetryState()
     {
         lock (_lock)
         {
-            _offset = 0;
-            _remainder = string.Empty;
             _serverInstanceId = null;
             _running = null;
             _queued = null;
@@ -605,6 +629,20 @@ public sealed class NInferJsonlTelemetryReader : IDisposable
             _specAcceptedTokens = 0;
             _specBackend = null;
             _specDraftWindow = 0;
+        }
+    }
+
+    /// <summary>
+    /// Full reset: resets both telemetry state and physical file state (cursor, remainder, file identity).
+    /// Used when the file is truncated, replaced, or the file path changes.
+    /// </summary>
+    public void Reset()
+    {
+        lock (_lock)
+        {
+            ResetTelemetryState();
+            _offset = 0;
+            _remainder = string.Empty;
             _trackedFileId = null;
             _trackedCreationTime = null;
             _trackedHeaderBytes = null;

@@ -39,11 +39,52 @@ public partial class AddBackendDialog : Window
         {
             string? token = string.IsNullOrWhiteSpace(TokenBox.Password) ? null : TokenBox.Password.Trim();
             using var http = HttpService.CreateOwning(HttpService.NormalizeBase(uri), TimeSpan.FromMilliseconds(800), token);
-            var fp = await new EndpointFingerprinter(_ => http)
-                .FingerprintAsync(HttpService.NormalizeBase(uri), CancellationToken.None);
-            ResultText.Text = fp.Kind == BackendKind.Unknown
-                ? $"No recognized backend ({fp.Evidence})"
-                : $"Detected: {fp.Kind.DisplayName()} — {fp.Evidence}";
+
+            string selectedType = TypeBox.SelectedItem as string ?? "Auto detect";
+            if (selectedType == "Auto detect")
+            {
+                var fp = await new EndpointFingerprinter(_ => http)
+                    .FingerprintAsync(HttpService.NormalizeBase(uri), CancellationToken.None);
+                ResultText.Text = fp.Kind == BackendKind.Unknown
+                    ? $"No recognized backend ({fp.Evidence})"
+                    : $"Detected: {fp.Kind.DisplayName()} — {fp.Evidence}";
+                return;
+            }
+
+            var mappedKind = BackendRegistry.ParseKind(MapType(selectedType));
+            if (mappedKind == BackendKind.NInfer)
+            {
+                var endpoint = new EndpointRef("manual-test", HttpService.NormalizeBase(uri), OriginKind.Manual, null, token);
+                var adapter = new NInferAdapter(endpoint);
+                var snap = await adapter.CollectAsync(http, CancellationToken.None);
+                string hostPath = NInferPathHelper.ResolveHostTelemetryPath(endpoint);
+                bool fileFound = System.IO.File.Exists(hostPath);
+                if (snap.State != ConnectionState.Offline)
+                {
+                    ResultText.Text = fileFound
+                        ? $"NInfer responding ({snap.State}) · Full telemetry file found"
+                        : $"NInfer responding ({snap.State}) · Limited HTTP mode";
+                }
+                else
+                {
+                    ResultText.Text = "NInfer endpoint offline or unreachable";
+                }
+            }
+            else
+            {
+                IBackendAdapter adapter = mappedKind switch
+                {
+                    BackendKind.Vllm => new VllmAdapter(),
+                    BackendKind.LlamaCpp => new LlamaCppAdapter(),
+                    BackendKind.LmStudio => new LmStudioAdapter(),
+                    BackendKind.Ollama => new OllamaAdapter(),
+                    _ => new GenericOpenAiAdapter(),
+                };
+                var snap = await adapter.CollectAsync(http, CancellationToken.None);
+                ResultText.Text = snap.State != ConnectionState.Offline
+                    ? $"{mappedKind.DisplayName()} responding ({snap.State}) · {(snap.ModelName ?? "catalog available")}"
+                    : $"{mappedKind.DisplayName()} endpoint offline or unreachable";
+            }
         }
         finally
         {

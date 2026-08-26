@@ -123,12 +123,13 @@ public static class WindowsProcessDiscovery
                 if (row.State != ListenState) continue;
 
                 ushort port = SwapPort(row.LocalPort);
-                bool isLoopback = row.LocalAddr.All(b => b == 0) ||
-                                  (row.LocalAddr[..15].All(b => b == 0) && row.LocalAddr[15] == 1);
                 bool isWildcard = row.LocalAddr.All(b => b == 0);
+                bool isLoopback = row.LocalAddr[..15].All(b => b == 0) && row.LocalAddr[15] == 1;
 
-                if (isLoopback || isWildcard)
-                    into.Add(new TcpListenerInfo(isLoopback ? "[::1]" : "[::]", port, (int)row.OwningPid));
+                if (isLoopback)
+                    into.Add(new TcpListenerInfo("[::1]", port, (int)row.OwningPid));
+                else if (isWildcard)
+                    into.Add(new TcpListenerInfo("[::]", port, (int)row.OwningPid));
             }
         }
         finally

@@ -137,6 +137,13 @@ public sealed class WidgetManager
 
         // TargetsChanged fires on a threadpool thread; w.Bind touches WPF,
         // so hop to the UI thread before touching the window.
+        void onClosed(object? sender, EventArgs e)
+        {
+            w.Closed -= onClosed;
+            Registry.TargetsChanged -= onTargets;
+        }
+        w.Closed += onClosed;
+
         Registry.TargetsChanged += onTargets;
         void onTargets()
         {
@@ -144,7 +151,10 @@ public sealed class WidgetManager
                 System.Windows.Threading.DispatcherPriority.Normal, () =>
                 {
                     if (tryBind())
+                    {
                         Registry.TargetsChanged -= onTargets;
+                        w.Closed -= onClosed;
+                    }
                 });
         }
     }

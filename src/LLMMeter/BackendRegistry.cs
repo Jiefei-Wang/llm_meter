@@ -32,6 +32,12 @@ public sealed class BackendRegistry : IDisposable
         foreach (var id in ManualEndpointIds())
             _discovery.AddKnownEndpoint(id);
 
+        _discovery.ScanCompleted += scanResult =>
+        {
+            bool changed = MergeDiscovered(scanResult);
+            if (changed) TargetsChanged?.Invoke();
+        };
+
         _discovery.Updated += servers =>
         {
             bool changed = MergeDiscovered(servers);
@@ -42,6 +48,7 @@ public sealed class BackendRegistry : IDisposable
     public DiscoveryService Discovery => _discovery;
 
     private readonly Dictionary<string, DiscoveredServer> _discovered = new();
+    private readonly Dictionary<string, int> _endpointMissCount = new(StringComparer.OrdinalIgnoreCase);
 
     // ---------------------------------------------------------------- manual
 
@@ -75,9 +82,16 @@ public sealed class BackendRegistry : IDisposable
         }
         lock (_lock) _manualKinds[e.Url] = kind;
 
+        string normKey = Uri.TryCreate(e.Url.Trim(), UriKind.Absolute, out var parsedU)
+            ? EndpointRef.NormalizeEndpointKey(parsedU)
+            : e.Url.Trim();
+
         lock (_lock)
         {
-            _config.ManualBackends.RemoveAll(m => m.Url.Equals(e.Url.Trim(), StringComparison.OrdinalIgnoreCase));
+            _config.ManualBackends.RemoveAll(m =>
+                m.Url.Equals(e.Url.Trim(), StringComparison.OrdinalIgnoreCase) ||
+                (Uri.TryCreate(m.Url.Trim(), UriKind.Absolute, out var mu) &&
+                 EndpointRef.NormalizeEndpointKey(mu).Equals(normKey, StringComparison.OrdinalIgnoreCase)));
             _config.ManualBackends.Add(new ManualEndpointConfig
             {
                 Name = e.Name,
@@ -101,9 +115,16 @@ public sealed class BackendRegistry : IDisposable
 
     public void RemoveManualEndpoint(string url)
     {
+        string normKey = Uri.TryCreate(url.Trim(), UriKind.Absolute, out var parsedUrl)
+            ? EndpointRef.NormalizeEndpointKey(parsedUrl)
+            : url.Trim();
+
         lock (_lock)
         {
-            _config.ManualBackends.RemoveAll(m => m.Url.Equals(url, StringComparison.OrdinalIgnoreCase));
+            _config.ManualBackends.RemoveAll(m =>
+                m.Url.Equals(url, StringComparison.OrdinalIgnoreCase) ||
+                (Uri.TryCreate(m.Url.Trim(), UriKind.Absolute, out var mu) &&
+                 EndpointRef.NormalizeEndpointKey(mu).Equals(normKey, StringComparison.OrdinalIgnoreCase)));
             _manualKinds.Remove(url);
             try { _configService.Save(_config); }
             catch (Exception ex) { Log.Warn($"failed saving config: {ex.Message}"); }
@@ -160,7 +181,10 @@ public sealed class BackendRegistry : IDisposable
 
     // ------------------------------------------------------------ discovered
 
-    internal bool MergeDiscovered(IReadOnlyList<DiscoveredServer> servers)
+    internal bool MergeDiscovered(IReadOnlyList<DiscoveredServer> servers) =>
+        MergeDiscovered(new DiscoveryScanResult(servers));
+
+    internal bool MergeDiscovered(DiscoveryScanResult scanResult)
     {
         bool changed = false;
         var toPruneDedupeKeys = new List<string>();
@@ -168,9 +192,11 @@ public sealed class BackendRegistry : IDisposable
         lock (_lock)
         {
             var newServerIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var s in servers)
+            foreach (var s in scanResult.Servers)
             {
                 newServerIds.Add(s.Endpoint.Id);
+                _endpointMissCount[s.Endpoint.Id] = 0;
+
                 if (!_discovered.TryGetValue(s.Endpoint.Id, out var existing))
                 {
                     changed = true;
@@ -183,12 +209,43 @@ public sealed class BackendRegistry : IDisposable
                 {
                     changed = true;
                     _discovered[s.Endpoint.Id] = s;
+                    if (existing.Kind != s.Kind)
+                    {
+                        Collectors.UpdateBackend(s.Endpoint, s.Kind);
+                    }
                 }
             }
 
-            var removedIds = _discovered.Keys
-                .Where(id => !newServerIds.Contains(id))
-                .ToList();
+            var removedIds = new List<string>();
+            foreach (var kvp in _discovered)
+            {
+                var id = kvp.Key;
+                var existing = kvp.Value;
+                if (newServerIds.Contains(id)) continue;
+
+                // Check if the discovery source was actually scanned in this pass
+                bool sourceScanned = existing.Endpoint.Origin switch
+                {
+                    OriginKind.WindowsHost => scanResult.WindowsScanned,
+                    OriginKind.Wsl => scanResult.WslScanned && (string.IsNullOrEmpty(existing.Endpoint.WslDistro) || scanResult.ScannedWslDistros.Contains(existing.Endpoint.WslDistro)),
+                    _ => true,
+                };
+
+                if (!sourceScanned)
+                {
+                    // Source scan failed or was skipped: preserve endpoint
+                    continue;
+                }
+
+                int misses = _endpointMissCount.GetValueOrDefault(id) + 1;
+                _endpointMissCount[id] = misses;
+
+                // Require at least 2 consecutive misses before removing
+                if (misses >= 2)
+                {
+                    removedIds.Add(id);
+                }
+            }
 
             if (removedIds.Count > 0)
             {
@@ -197,6 +254,7 @@ public sealed class BackendRegistry : IDisposable
                 {
                     var removed = _discovered[id];
                     _discovered.Remove(id);
+                    _endpointMissCount.Remove(id);
 
                     string dedupeKey = EndpointRef.NormalizeEndpointKey(removed.Endpoint.BaseUrl);
 
@@ -216,7 +274,7 @@ public sealed class BackendRegistry : IDisposable
 
         foreach (var dedupeKey in toPruneDedupeKeys)
         {
-            Collectors.Remove(dedupeKey);
+            Collectors.NotifyDisappeared(dedupeKey);
         }
 
         return changed;
@@ -246,8 +304,8 @@ public sealed class BackendRegistry : IDisposable
 
         void AddEntry(DiscoveredServer s, string group)
         {
-            var collector = Collectors.GetOrAdd(s.Endpoint, s.Kind);
-            var latest = collector.Latest;
+            var collector = Collectors.TryGet(s.Endpoint);
+            var latest = collector?.Latest;
             bool isRouter = IsRouterMode(s.Kind, latest);
 
             if (isRouter)
@@ -309,9 +367,9 @@ public sealed class BackendRegistry : IDisposable
             var norm = HttpService.NormalizeBase(uri);
             string id = DiscoveryService.MakeId(OriginKind.Manual, null, norm);
             var endpoint = new EndpointRef(id, norm, OriginKind.Manual, null, m.PlainTextApiKey);
-            var collector = Collectors.GetOrAdd(endpoint, LookupManualKind(m));
-            var latest = collector.Latest;
-            var kind = collector.KnownKind ?? BackendKind.Unknown;
+            var collector = Collectors.TryGet(endpoint);
+            var latest = collector?.Latest;
+            var kind = LookupManualKind(m) ?? BackendKind.Unknown;
             bool isRouter = IsRouterMode(kind, latest);
 
             string label = string.IsNullOrWhiteSpace(m.Name)

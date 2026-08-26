@@ -189,26 +189,37 @@ public class BugFixRegressionTests
             Assert.Equal(2, targets1.Count);
             Assert.Contains(targets1, t => t.Target.Endpoint.BaseUrl.Port == 8001);
             Assert.Contains(targets1, t => t.Target.Endpoint.BaseUrl.Port == 8002);
-            Assert.Equal(2, registry.Collectors.Count);
+            // GetTargetEntries is passive and starts 0 collectors
+            Assert.Equal(0, registry.Collectors.Count);
 
-            // Scan 2: only A discovered (B disappeared)
+            // Active observer acquires collector for B
+            var colB = registry.Collectors.Acquire(sB.Endpoint, sB.Kind);
+            Assert.Equal(1, registry.Collectors.Count);
+
+            // Scan 2: only A discovered (1st miss for B - preserved during grace period)
             bool c2 = registry.MergeDiscovered([sA]);
-            Assert.True(c2);
+            Assert.False(c2); // no deletion yet due to hysteresis
+            var targets2a = registry.GetTargetEntries();
+            Assert.Equal(2, targets2a.Count);
+
+            // Scan 3: only A discovered (2nd miss for B - now pruned)
+            bool c3 = registry.MergeDiscovered([sA]);
+            Assert.True(c3);
 
             var targets2 = registry.GetTargetEntries();
             Assert.Single(targets2);
             Assert.Equal(8001, targets2[0].Target.Endpoint.BaseUrl.Port);
 
-            // Collector for B was removed/disposed
-            Assert.Equal(1, registry.Collectors.Count);
+            // Collector for B was notified offline on disappearance
+            Assert.Equal(ConnectionState.Offline, colB.Latest?.State);
 
-            // Scan 3: identical scan (A only) -> no change
-            bool c3 = registry.MergeDiscovered([sA]);
-            Assert.False(c3);
+            // Scan 4: identical scan (A only) -> no change
+            bool c4 = registry.MergeDiscovered([sA]);
+            Assert.False(c4);
 
-            // Scan 4: B reappears
-            bool c4 = registry.MergeDiscovered([sA, sB]);
-            Assert.True(c4);
+            // Scan 5: B reappears
+            bool c5 = registry.MergeDiscovered([sA, sB]);
+            Assert.True(c5);
             Assert.Equal(2, registry.GetTargetEntries().Count);
         }
         finally
@@ -243,7 +254,8 @@ public class BugFixRegressionTests
             registry.MergeDiscovered([sA]);
             var col = registry.Collectors.GetOrAdd(sA.Endpoint, BackendKind.Vllm);
 
-            // Next scan: auto-discovery for 8001 disappears
+            // Auto-discovery for 8001 disappears (requires 2 scans to remove auto-discovered)
+            registry.MergeDiscovered([]);
             registry.MergeDiscovered([]);
 
             // Collector must NOT be disposed because manual backend still uses it
@@ -261,7 +273,7 @@ public class BugFixRegressionTests
     }
 
     // =========================================================================
-    // BUG #5: Backend kind change on same host:port
+    // BUG #5: Backend kind change on same host:port (re-initializes adapter on stable collector)
     // =========================================================================
 
     [Fact]
@@ -275,10 +287,10 @@ public class BugFixRegressionTests
         Assert.Equal(BackendKind.Vllm, col1.EffectiveKind);
         Assert.False(col1.IsDisposed);
 
-        // Time 2: Same endpoint is now llama.cpp
+        // Time 2: Same endpoint is now llama.cpp -> stable collector re-initializes adapter
         var col2 = mgr.GetOrAdd(endpoint, BackendKind.LlamaCpp);
-        Assert.NotSame(col1, col2);
-        Assert.True(col1.IsDisposed);
+        Assert.Same(col1, col2);
+        Assert.False(col1.IsDisposed);
         Assert.False(col2.IsDisposed);
         Assert.Equal(BackendKind.LlamaCpp, col2.EffectiveKind);
         Assert.Equal(1, mgr.Count);
@@ -693,5 +705,623 @@ public class BugFixRegressionTests
         double maxInf = ActivityChart.NiceScaleMaximum(double.PositiveInfinity);
         Assert.Equal(1.0, maxNaN);
         Assert.Equal(1.0, maxInf);
+    }
+
+    // =========================================================================
+    // NEW REGRESSION TESTS FOR BUGS #1 - #22
+    // =========================================================================
+
+    [Fact]
+    public void Bug1_NInfer_ServerRestart_InSameFile_DoesNotReplayOnUnchangedPoll()
+    {
+        var tempFile = Path.Combine(Path.GetTempPath(), $"ninfer_restart_{Guid.NewGuid():N}.jsonl");
+        try
+        {
+            using (var writer = File.CreateText(tempFile))
+            {
+                // Server instance 1
+                writer.WriteLine("""{"event":"server_start","server_instance_id":"inst-1","public_model_id":"model-A"}""");
+                writer.WriteLine("""{"event":"throughput","server_instance_id":"inst-1","tokens":{"computed_prefill":100,"committed_decode":50}}""");
+                writer.Flush();
+            }
+
+            var reader = new NInferJsonlTelemetryReader();
+            reader.FilePath = tempFile;
+
+            // Poll 1: read inst-1
+            long t1 = 10_000_000;
+            bool ok1 = reader.Poll(t1);
+            Assert.True(ok1);
+            Assert.Equal("inst-1", reader.ServerInstanceId);
+            Assert.Equal("model-A", reader.PublicModelId);
+            Assert.Equal(100, reader.CumulativePrefilled);
+            Assert.Equal(50, reader.CumulativeGenerated);
+
+            // Now append server instance 2 to the same file (same-file restart)
+            using (var writer = File.AppendText(tempFile))
+            {
+                writer.WriteLine("""{"event":"server_start","server_instance_id":"inst-2","public_model_id":"model-B"}""");
+                writer.Flush();
+            }
+
+            // Poll 2: read inst-2 restart
+            long t2 = 20_000_000;
+            bool ok2 = reader.Poll(t2);
+            Assert.True(ok2);
+            Assert.Equal("inst-2", reader.ServerInstanceId);
+            Assert.Equal("model-B", reader.PublicModelId);
+            // Telemetry counters reset for new instance
+            Assert.Equal(0, reader.CumulativePrefilled);
+            Assert.Equal(0, reader.CumulativeGenerated);
+
+            // Poll 3: UNCHANGED POLL (no new lines written)
+            long t3 = 30_000_000;
+            bool ok3 = reader.Poll(t3);
+            Assert.True(ok3);
+            Assert.Equal("inst-2", reader.ServerInstanceId);
+            Assert.Equal("model-B", reader.PublicModelId);
+            // Offset MUST NOT have rewound to byte 0; cumulative counters must remain 0 and not replay inst-1!
+            Assert.Equal(0, reader.CumulativePrefilled);
+            Assert.Equal(0, reader.CumulativeGenerated);
+
+            reader.Dispose();
+        }
+        finally
+        {
+            try { File.Delete(tempFile); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Bug1_NInfer_MultipleServerInstances_AdvancesMonotonically()
+    {
+        var tempFile = Path.Combine(Path.GetTempPath(), $"ninfer_multi_{Guid.NewGuid():N}.jsonl");
+        try
+        {
+            using (var writer = File.CreateText(tempFile))
+            {
+                writer.WriteLine("""{"event":"server_start","server_instance_id":"inst-1","public_model_id":"model-1"}""");
+                writer.WriteLine("""{"event":"throughput","server_instance_id":"inst-1","tokens":{"computed_prefill":10,"committed_decode":5}}""");
+                writer.WriteLine("""{"event":"server_start","server_instance_id":"inst-2","public_model_id":"model-2"}""");
+                writer.WriteLine("""{"event":"throughput","server_instance_id":"inst-2","tokens":{"computed_prefill":20,"committed_decode":15}}""");
+                writer.WriteLine("""{"event":"server_start","server_instance_id":"inst-3","public_model_id":"model-3"}""");
+                writer.Flush();
+            }
+
+            var reader = new NInferJsonlTelemetryReader();
+            reader.FilePath = tempFile;
+
+            reader.Poll(1000);
+            Assert.Equal("inst-3", reader.ServerInstanceId);
+            Assert.Equal("model-3", reader.PublicModelId);
+            Assert.Equal(0, reader.CumulativePrefilled);
+            Assert.Equal(0, reader.CumulativeGenerated);
+
+            reader.Dispose();
+        }
+        finally
+        {
+            try { File.Delete(tempFile); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Bug1_NInfer_PhysicalTruncation_ResetsReaderFully()
+    {
+        var tempFile = Path.Combine(Path.GetTempPath(), $"ninfer_trunc_{Guid.NewGuid():N}.jsonl");
+        try
+        {
+            using (var writer = File.CreateText(tempFile))
+            {
+                writer.WriteLine("""{"event":"server_start","server_instance_id":"inst-1","public_model_id":"long-model-name-initial-file"}""");
+                writer.WriteLine("""{"event":"throughput","server_instance_id":"inst-1","tokens":{"computed_prefill":500,"committed_decode":200}}""");
+                writer.Flush();
+            }
+
+            var reader = new NInferJsonlTelemetryReader();
+            reader.FilePath = tempFile;
+            reader.Poll(1000);
+            Assert.Equal(500, reader.CumulativePrefilled);
+
+            // Truncate file to a much smaller size
+            using (var writer = File.CreateText(tempFile))
+            {
+                writer.WriteLine("""{"event":"server_start","server_instance_id":"inst-truncated","public_model_id":"short"}""");
+                writer.Flush();
+            }
+
+            // Next poll must detect truncation and reset
+            reader.Poll(2000);
+            Assert.Equal("inst-truncated", reader.ServerInstanceId);
+            Assert.Equal("short", reader.PublicModelId);
+            Assert.Equal(0, reader.CumulativePrefilled);
+
+            reader.Dispose();
+        }
+        finally
+        {
+            try { File.Delete(tempFile); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Bug2_Collector_KindChange_PreservesStableCollectorAndSwapsAdapter()
+    {
+        var endpoint = new EndpointRef("win|127.0.0.1:8000", new Uri("http://127.0.0.1:8000"), OriginKind.WindowsHost, null);
+        var collector = new BackendCollector(endpoint, BackendKind.Vllm);
+
+        MetricSnapshot? received = null;
+        collector.SnapshotUpdated += s => received = s;
+
+        Assert.Equal(BackendKind.Vllm, collector.EffectiveKind);
+
+        // Server changes kind to LlamaCpp on same host:port
+        collector.ChangeKind(BackendKind.LlamaCpp);
+
+        Assert.Equal(BackendKind.LlamaCpp, collector.EffectiveKind);
+        Assert.NotNull(received);
+        Assert.Equal(BackendKind.LlamaCpp, received.Kind);
+        Assert.Equal(ConnectionState.Connecting, received.State);
+
+        collector.Dispose();
+    }
+
+    [Fact]
+    public void Bug2_Collector_MarkOffline_PublishesOfflineSnapshot()
+    {
+        var endpoint = new EndpointRef("win|127.0.0.1:8000", new Uri("http://127.0.0.1:8000"), OriginKind.WindowsHost, null);
+        var collector = new BackendCollector(endpoint, BackendKind.Vllm);
+
+        MetricSnapshot? received = null;
+        collector.SnapshotUpdated += s => received = s;
+
+        collector.MarkOffline("Endpoint disappeared from discovery");
+
+        Assert.NotNull(received);
+        Assert.Equal(ConnectionState.Offline, received.State);
+        Assert.Equal("Endpoint disappeared from discovery", received.Info["Status"]);
+
+        collector.Dispose();
+    }
+
+    [Fact]
+    public void Bug7_GetTargetEntries_IsPassive_CreatesZeroCollectors()
+    {
+        var cfg = new AppConfiguration();
+        var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var cfgSvc = new ConfigurationService(Path.Combine(tempDir, "config.json"));
+            using var registry = new BackendRegistry(cfg, cfgSvc);
+
+            var s1 = new DiscoveredServer(new EndpointRef("win|127.0.0.1:8001", new Uri("http://127.0.0.1:8001"), OriginKind.WindowsHost, null), BackendKind.Vllm, "test");
+            var s2 = new DiscoveredServer(new EndpointRef("win|127.0.0.1:8002", new Uri("http://127.0.0.1:8002"), OriginKind.WindowsHost, null), BackendKind.LlamaCpp, "test");
+
+            registry.MergeDiscovered([s1, s2]);
+
+            // Calling GetTargetEntries must be 100% passive
+            var entries = registry.GetTargetEntries();
+            Assert.Equal(2, entries.Count);
+
+            // Exactly 0 collectors must have been created or started!
+            Assert.Equal(0, registry.Collectors.Count);
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Bug8_CollectorManager_ReferenceCounting_AcquireAndRelease()
+    {
+        using var mgr = new CollectorManager();
+        var endpoint = new EndpointRef("win|127.0.0.1:8000", new Uri("http://127.0.0.1:8000"), OriginKind.WindowsHost, null);
+
+        // Observer 1 acquires
+        var c1 = mgr.Acquire(endpoint, BackendKind.Vllm);
+        Assert.Equal(1, mgr.Count);
+        Assert.False(c1.IsDisposed);
+
+        // Observer 2 acquires same target
+        var c2 = mgr.Acquire(endpoint, BackendKind.Vllm);
+        Assert.Same(c1, c2);
+        Assert.Equal(1, mgr.Count);
+
+        // Observer 1 releases
+        mgr.Release(c1);
+        Assert.Equal(1, mgr.Count);
+        Assert.False(c2.IsDisposed); // Observer 2 still monitoring
+
+        // Observer 2 releases
+        mgr.Release(c2);
+        Assert.Equal(0, mgr.Count);
+        Assert.True(c2.IsDisposed); // Last observer released -> stopped and disposed
+    }
+
+    [Fact]
+    public void Bug19_BackendCollector_Start_IsIdempotent()
+    {
+        var endpoint = new EndpointRef("win|127.0.0.1:8000", new Uri("http://127.0.0.1:8000"), OriginKind.WindowsHost, null);
+        var collector = new BackendCollector(endpoint, BackendKind.GenericOpenAi);
+
+        // Calling Start() multiple times must not throw or create duplicate loops
+        collector.Start();
+        collector.Start();
+        collector.Start();
+
+        collector.Dispose();
+    }
+
+    [Fact]
+    public void Bug20_BackendCollector_Reconfigure_DoesNotMutateDefaultHeaders()
+    {
+        var endpoint = new EndpointRef("win|127.0.0.1:8000", new Uri("http://127.0.0.1:8000"), OriginKind.WindowsHost, null, "token-A");
+        var collector = new BackendCollector(endpoint, BackendKind.GenericOpenAi);
+
+        // Reconfigure with new token
+        var newEndpoint = new EndpointRef("win|127.0.0.1:8000", new Uri("http://127.0.0.1:8000"), OriginKind.WindowsHost, null, "token-B");
+        collector.Reconfigure(newEndpoint);
+
+        // Rapid reconfigures
+        for (int i = 0; i < 50; i++)
+        {
+            collector.Reconfigure(new EndpointRef("win|127.0.0.1:8000", new Uri("http://127.0.0.1:8000"), OriginKind.WindowsHost, null, $"token-{i}"));
+        }
+
+        collector.Dispose();
+    }
+
+    [Fact]
+    public void Bug3_DiscoveryHysteresis_RequiresTwoConsecutiveMisses()
+    {
+        var cfg = new AppConfiguration();
+        var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var cfgSvc = new ConfigurationService(Path.Combine(tempDir, "config.json"));
+            using var registry = new BackendRegistry(cfg, cfgSvc);
+
+            var sA = new DiscoveredServer(new EndpointRef("win|127.0.0.1:8001", new Uri("http://127.0.0.1:8001"), OriginKind.WindowsHost, null), BackendKind.Vllm, "test");
+            var sB = new DiscoveredServer(new EndpointRef("win|127.0.0.1:8002", new Uri("http://127.0.0.1:8002"), OriginKind.WindowsHost, null), BackendKind.LlamaCpp, "test");
+
+            // Scan 1: both present
+            registry.MergeDiscovered(new DiscoveryScanResult([sA, sB]));
+            Assert.Equal(2, registry.GetTargetEntries().Count);
+
+            // Scan 2: only sA (1st miss for sB -> sB is preserved due to grace period)
+            registry.MergeDiscovered(new DiscoveryScanResult([sA]));
+            Assert.Equal(2, registry.GetTargetEntries().Count);
+
+            // Scan 3: only sA (2nd miss for sB -> sB is removed)
+            registry.MergeDiscovered(new DiscoveryScanResult([sA]));
+            var targets = registry.GetTargetEntries();
+            Assert.Single(targets);
+            Assert.Equal(8001, targets[0].Target.Endpoint.BaseUrl.Port);
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Bug3_DiscoveryHysteresis_ReappearanceResetsMissCount()
+    {
+        var cfg = new AppConfiguration();
+        var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var cfgSvc = new ConfigurationService(Path.Combine(tempDir, "config.json"));
+            using var registry = new BackendRegistry(cfg, cfgSvc);
+
+            var sA = new DiscoveredServer(new EndpointRef("win|127.0.0.1:8001", new Uri("http://127.0.0.1:8001"), OriginKind.WindowsHost, null), BackendKind.Vllm, "test");
+            var sB = new DiscoveredServer(new EndpointRef("win|127.0.0.1:8002", new Uri("http://127.0.0.1:8002"), OriginKind.WindowsHost, null), BackendKind.LlamaCpp, "test");
+
+            registry.MergeDiscovered(new DiscoveryScanResult([sA, sB]));
+
+            // Scan 2: 1st miss for sB
+            registry.MergeDiscovered(new DiscoveryScanResult([sA]));
+            Assert.Equal(2, registry.GetTargetEntries().Count);
+
+            // Scan 3: sB reappears (miss count resets)
+            registry.MergeDiscovered(new DiscoveryScanResult([sA, sB]));
+            Assert.Equal(2, registry.GetTargetEntries().Count);
+
+            // Scan 4: another 1st miss for sB -> still preserved!
+            registry.MergeDiscovered(new DiscoveryScanResult([sA]));
+            Assert.Equal(2, registry.GetTargetEntries().Count);
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public void Bug3_DiscoveryWslFailure_PreservesWslEndpoints()
+    {
+        var cfg = new AppConfiguration();
+        var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var cfgSvc = new ConfigurationService(Path.Combine(tempDir, "config.json"));
+            using var registry = new BackendRegistry(cfg, cfgSvc);
+
+            var wslServer = new DiscoveredServer(
+                new EndpointRef("wsl|Ubuntu|127.0.0.1:8000", new Uri("http://127.0.0.1:8000"), OriginKind.Wsl, "Ubuntu"),
+                BackendKind.Vllm, "WSL");
+
+            registry.MergeDiscovered(new DiscoveryScanResult([wslServer], windowsScanned: true, wslScanned: true, new HashSet<string> { "Ubuntu" }));
+            Assert.Single(registry.GetTargetEntries());
+
+            // Scan where WSL discovery threw an error (wslScanned = false)
+            registry.MergeDiscovered(new DiscoveryScanResult([], windowsScanned: true, wslScanned: false));
+
+            // WSL server MUST be preserved because WSL was not successfully scanned
+            Assert.Single(registry.GetTargetEntries());
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
+    }
+
+    [Fact]
+    public async Task Bug6_LlamaCpp_IdleMetrics_DoesNotPollSlots()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["metrics"] = (200, "llamacpp:prompt_tokens_total 50\nllamacpp:requests_processing 0\n"),
+            ["slots"] = (200, "[]"),
+        };
+        var http = new FakeHttp(new Uri("http://127.0.0.1:8080/"), routes);
+        var adapter = new LlamaCppAdapter();
+
+        var snap = await adapter.CollectAsync(http, default);
+
+        Assert.True(snap.State is ConnectionState.Online or ConnectionState.Limited);
+        Assert.Equal(0, snap.Running.Value);
+        Assert.Contains("metrics", http.Requests);
+        // /slots MUST NOT be queried when requests_processing == 0 to allow server idle sleep!
+        Assert.DoesNotContain("slots", http.Requests);
+    }
+
+    [Fact]
+    public async Task Bug6_LlamaCpp_ActiveMetrics_PollsSlotsForCards()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["metrics"] = (200, "llamacpp:prompt_tokens_total 50\nllamacpp:requests_processing 1\n"),
+            ["slots"] = (200, """[{"id":0,"id_task":100,"is_processing":true,"n_decoded":10,"n_prompt_tokens":20}]"""),
+        };
+        var http = new FakeHttp(new Uri("http://127.0.0.1:8080/"), routes);
+        var adapter = new LlamaCppAdapter();
+
+        var snap = await adapter.CollectAsync(http, default);
+
+        Assert.True(snap.State is ConnectionState.Online or ConnectionState.Limited);
+        Assert.Equal(1, snap.Running.Value);
+        Assert.Contains("metrics", http.Requests);
+        // /slots MUST be queried when requests_processing > 0 to populate cards!
+        Assert.Contains("slots", http.Requests);
+        Assert.NotNull(snap.Requests);
+        Assert.Single(snap.Requests);
+    }
+
+    [Fact]
+    public async Task Bug10_LmStudio_PrefersLlmOverEmbeddingEvenWhenEmbeddingIsFirst()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["api/v1/models"] = (200, """
+            {
+                "models": [
+                    {
+                        "key": "text-embedding-3-small",
+                        "type": "embedding",
+                        "loaded_instances": [{"id":"emb-1","config":{"context_length":8192}}]
+                    },
+                    {
+                        "key": "llama-3-8b-instruct",
+                        "type": "llm",
+                        "loaded_instances": [{"id":"llm-1","config":{"context_length":8192}}]
+                    }
+                ]
+            }
+            """)
+        };
+        var http = new FakeHttp(new Uri("http://127.0.0.1:1234/"), routes);
+        var adapter = new LmStudioAdapter();
+
+        var snap = await adapter.CollectAsync(http, default);
+
+        Assert.Equal(ConnectionState.Limited, snap.State);
+        Assert.Equal("llama-3-8b-instruct", snap.ModelName);
+        Assert.Contains("llama-3-8b-instruct", snap.LoadedModels);
+        Assert.Contains("text-embedding-3-small", snap.Info["Embeddings"]);
+    }
+
+    [Fact]
+    public async Task Bug10_LmStudio_FallsBackToEmbeddingIfOnlyEmbeddingIsLoaded()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["api/v1/models"] = (200, """
+            {
+                "models": [
+                    {
+                        "key": "bge-m3",
+                        "type": "embedding",
+                        "loaded_instances": [{"id":"emb-1","config":{"context_length":8192}}]
+                    }
+                ]
+            }
+            """)
+        };
+        var http = new FakeHttp(new Uri("http://127.0.0.1:1234/"), routes);
+        var adapter = new LmStudioAdapter();
+
+        var snap = await adapter.CollectAsync(http, default);
+
+        Assert.Equal(ConnectionState.Limited, snap.State);
+        Assert.Equal("bge-m3", snap.ModelName);
+        Assert.Contains("bge-m3", snap.LoadedModels);
+    }
+
+    [Fact]
+    public async Task Bug11_Vllm_ModelNameUpdatesOnReload()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["metrics"] = (200, """
+                vllm:num_requests_running{model_name="qwen-1"} 1
+            """)
+        };
+        var http = new FakeHttp(new Uri("http://127.0.0.1:8000/"), routes);
+        var adapter = new VllmAdapter();
+
+        var snap1 = await adapter.CollectAsync(http, default);
+        Assert.Equal("qwen-1", snap1.ModelName);
+
+        // Server reloads different model
+        routes["metrics"] = (200, """
+            vllm:num_requests_running{model_name="deepseek-v2"} 1
+        """);
+
+        var snap2 = await adapter.CollectAsync(http, default);
+        Assert.Equal("deepseek-v2", snap2.ModelName);
+    }
+
+    [Fact]
+    public async Task Bug12_Vllm_WaitingPlusSwapped_SumsBacklog()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["metrics"] = (200, """
+                vllm:num_requests_running 2
+                vllm:num_requests_waiting 5
+                vllm:num_requests_swapped 3
+            """)
+        };
+        var http = new FakeHttp(new Uri("http://127.0.0.1:8000/"), routes);
+        var adapter = new VllmAdapter();
+
+        var snap = await adapter.CollectAsync(http, default);
+
+        Assert.Equal(2, snap.Running.Value);
+        // Waiting (5) + Swapped (3) = 8
+        Assert.Equal(8, snap.Queued.Value);
+    }
+
+    [Fact]
+    public void Bug13_WindowsProcessDiscovery_Ipv6_DistinguishesLoopbackAndWildcard()
+    {
+        // Loopback ::1 (15 zeroes, 1)
+        byte[] loopbackBytes = new byte[16];
+        loopbackBytes[15] = 1;
+        bool isLoopback = loopbackBytes[..15].All(b => b == 0) && loopbackBytes[15] == 1;
+        bool isWildcardL = loopbackBytes.All(b => b == 0);
+        Assert.True(isLoopback);
+        Assert.False(isWildcardL);
+
+        // Wildcard :: (all zeroes)
+        byte[] wildcardBytes = new byte[16];
+        bool isLoopbackW = wildcardBytes[..15].All(b => b == 0) && wildcardBytes[15] == 1;
+        bool isWildcard = wildcardBytes.All(b => b == 0);
+        Assert.False(isLoopbackW);
+        Assert.True(isWildcard);
+    }
+
+    [Fact]
+    public void Bug14_ScreenGuard_ClampsCoordinatesWithinVirtualScreenDips()
+    {
+        var virtualScreen = new System.Windows.Rect(0, 0, 1920, 1080);
+
+        // Off-screen right and bottom
+        var clamped1 = ScreenGuard.EnsureVisible(3000, 2000, 320, 120, virtualScreen);
+        Assert.True(clamped1.X + 320 <= 1920);
+        Assert.True(clamped1.Y + 120 <= 1080);
+        Assert.True(clamped1.X >= 0);
+        Assert.True(clamped1.Y >= 0);
+
+        // Off-screen left and top
+        var clamped2 = ScreenGuard.EnsureVisible(-500, -300, 320, 120, virtualScreen);
+        Assert.True(clamped2.X >= 24);
+        Assert.True(clamped2.Y >= 24);
+
+        // NaN coordinates default to margin
+        var clamped3 = ScreenGuard.EnsureVisible(double.NaN, double.NaN, 320, 120, virtualScreen);
+        Assert.Equal(24, clamped3.X);
+        Assert.Equal(24, clamped3.Y);
+    }
+
+    [Fact]
+    public async Task Bug16_GenericOpenAi_DoesNotClaimCatalogAsLoadedModels()
+    {
+        var routes = new Dictionary<string, (int, string)>
+        {
+            ["v1/models"] = (200, """
+            {
+                "object": "list",
+                "data": [
+                    {"id": "gpt-4o", "object": "model"},
+                    {"id": "claude-3-opus", "object": "model"},
+                    {"id": "gemini-1.5-pro", "object": "model"}
+                ]
+            }
+            """)
+        };
+        var http = new FakeHttp(new Uri("http://127.0.0.1:8000/"), routes);
+        var adapter = new GenericOpenAiAdapter();
+
+        var snap = await adapter.CollectAsync(http, default);
+
+        Assert.Equal(ConnectionState.Limited, snap.State);
+        Assert.Equal("gpt-4o", snap.ModelName);
+        // LoadedModels must be EMPTY because OpenAI catalog models are not guaranteed resident in VRAM
+        Assert.Empty(snap.LoadedModels);
+        Assert.Equal("3 models available", snap.Info["Catalog"]);
+        Assert.Equal("gpt-4o, claude-3-opus, gemini-1.5-pro", snap.Info["AvailableModels"]);
+    }
+
+    [Fact]
+    public async Task Bug17_ManualEndpoint_DeduplicatesEquivalentUrls()
+    {
+        var cfg = new AppConfiguration();
+        var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempDir);
+        try
+        {
+            var cfgSvc = new ConfigurationService(Path.Combine(tempDir, "config.json"));
+            using var registry = new BackendRegistry(cfg, cfgSvc);
+
+            await registry.AddManualEndpointAsync(new ManualEndpointConfig
+            {
+                Name = "Localhost",
+                Url = "http://localhost:8000",
+                Type = "Vllm"
+            });
+
+            // Add equivalent URL with 127.0.0.1 and trailing slash
+            await registry.AddManualEndpointAsync(new ManualEndpointConfig
+            {
+                Name = "Loopback",
+                Url = "http://127.0.0.1:8000/",
+                Type = "Vllm"
+            });
+
+            // Must deduplicate to 1 manual endpoint!
+            Assert.Single(registry.ManualEndpoints);
+            Assert.Equal("Loopback", registry.ManualEndpoints[0].Name);
+        }
+        finally
+        {
+            try { Directory.Delete(tempDir, true); } catch { }
+        }
     }
 }

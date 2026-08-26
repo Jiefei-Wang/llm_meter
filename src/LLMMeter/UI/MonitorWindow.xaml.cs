@@ -77,8 +77,8 @@ public partial class MonitorWindow : Window
             _vm.SetUsageBaselines(null, null);
         }
         var modelId = entry.Target.RequiresModelScopedCollector ? entry.Target.ModelId : null;
-        var collector = _manager.Registry.Collectors.GetOrAdd(entry.Target.Endpoint, KindOrNull(entry), modelId);
-        _vm.Bind(collector, entry);
+        var collector = _manager.Registry.Collectors.Acquire(entry.Target.Endpoint, KindOrNull(entry), modelId);
+        _vm.Bind(collector, entry, () => _manager.Registry.Collectors.Release(collector));
         Persisted.BackendId = entry.Target.GroupKey;
         _manager.QueueSave();
     }

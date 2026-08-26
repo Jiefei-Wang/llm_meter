@@ -19,12 +19,15 @@ public sealed class BackendCollector : IDisposable
     private readonly Func<BackendKind, IBackendAdapter> _adapterFactory;
     private readonly HttpClient _client;
     private readonly CancellationTokenSource _cts = new();
+    private readonly object _adapterLock = new();
 
+    private volatile string? _authToken;
     private IBackendAdapter? _adapter;
     private MetricSnapshot? _latest;
     private ConnectionState? _lastLoggedState;
     private int _consecutiveFailures;
     private Task _loop = null!;
+    private int _started;
     private int _disposed;
 
     public event Action<MetricSnapshot>? SnapshotUpdated;
@@ -40,7 +43,8 @@ public sealed class BackendCollector : IDisposable
     {
         _endpoint = endpoint;
         _adapterFactory = adapterFactory;
-        _client = SharedClientFactory.Create(authToken ?? endpoint.AuthToken);
+        _authToken = authToken ?? endpoint.AuthToken;
+        _client = SharedClientFactory.Create();
         _client.Timeout = PollTimeout;
         KnownKind = knownKind;
     }
@@ -48,23 +52,62 @@ public sealed class BackendCollector : IDisposable
     public EndpointRef Endpoint => _endpoint;
     public string? ModelId { get; }
     public BackendKind? KnownKind { get; private set; }
-    public BackendKind EffectiveKind => _adapter?.Kind ?? KnownKind ?? BackendKind.Unknown;
+    public BackendKind EffectiveKind
+    {
+        get
+        {
+            lock (_adapterLock)
+                return _adapter?.Kind ?? KnownKind ?? BackendKind.Unknown;
+        }
+    }
     public MetricSnapshot? Latest => Volatile.Read(ref _latest);
     public bool IsDisposed => Volatile.Read(ref _disposed) != 0;
-
 
     public void Reconfigure(EndpointRef endpoint)
     {
         _endpoint = endpoint;
-        if (!string.IsNullOrWhiteSpace(endpoint.AuthToken))
+        _authToken = endpoint.AuthToken;
+    }
+
+    public void ChangeKind(BackendKind newKind)
+    {
+        if (newKind == BackendKind.Unknown || KnownKind == newKind) return;
+        lock (_adapterLock)
         {
-            _client.DefaultRequestHeaders.Authorization =
-                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", endpoint.AuthToken.Trim());
+            if (KnownKind == newKind) return;
+            KnownKind = newKind;
+            var oldAdapter = _adapter;
+            _adapter = _adapterFactory(newKind);
+            if (oldAdapter is IDisposable d)
+            {
+                try { d.Dispose(); } catch { }
+            }
+            _lastLoggedState = null;
+            _consecutiveFailures = 0;
+            Publish(new MetricSnapshot
+            {
+                Timestamp = DateTimeOffset.Now,
+                State = ConnectionState.Connecting,
+                Kind = newKind,
+                ModelName = null,
+                Info = new Dictionary<string, string> { ["Status"] = $"switched to {newKind.DisplayName()}" }
+            });
         }
-        else
+    }
+
+    public void MarkOffline(string reason = "Endpoint unavailable")
+    {
+        var kind = EffectiveKind;
+        if (kind == BackendKind.Unknown) kind = BackendKind.GenericOpenAi;
+        var snap = new MetricSnapshot
         {
-            _client.DefaultRequestHeaders.Authorization = null;
-        }
+            Timestamp = DateTimeOffset.Now,
+            State = ConnectionState.Offline,
+            Kind = kind,
+            Requests = null,
+            Info = new Dictionary<string, string> { ["Status"] = reason }
+        };
+        Publish(snap);
     }
 
     private static IBackendAdapter CreateAdapter(BackendKind kind, EndpointRef endpoint, string? modelId = null) => kind switch
@@ -81,15 +124,31 @@ public sealed class BackendCollector : IDisposable
     /// <summary>Llama / NInfer adapter command-line injection point (help popup).</summary>
     public void SetCurrentCommand(string cmd)
     {
-        if (_adapter is LlamaCppAdapter l) l.SetCurrentCommand(cmd);
-        else if (_adapter is NInferAdapter n) n.SetCurrentCommand(cmd);
+        lock (_adapterLock)
+        {
+            if (_adapter is LlamaCppAdapter l) l.SetCurrentCommand(cmd);
+            else if (_adapter is NInferAdapter n) n.SetCurrentCommand(cmd);
+        }
     }
 
-    public TelemetryHelp? GetHelp() => _adapter?.GetHelp();
+    public TelemetryHelp? GetHelp()
+    {
+        lock (_adapterLock) return _adapter?.GetHelp();
+    }
 
-    public BackendCapabilities Capabilities => _adapter?.Capabilities ?? BackendCapabilities.None;
+    public BackendCapabilities Capabilities
+    {
+        get
+        {
+            lock (_adapterLock) return _adapter?.Capabilities ?? BackendCapabilities.None;
+        }
+    }
 
-    public void Start() => _loop = Task.Run(() => PollLoopAsync(_cts.Token));
+    public void Start()
+    {
+        if (Interlocked.CompareExchange(ref _started, 1, 0) == 0)
+            _loop = Task.Run(() => PollLoopAsync(_cts.Token));
+    }
 
     private async Task PollLoopAsync(CancellationToken ct)
     {
@@ -97,23 +156,32 @@ public sealed class BackendCollector : IDisposable
         // Use the collector's authenticated client to preserve any configured Bearer token.
         if (KnownKind is null or BackendKind.Unknown)
         {
-            using var probeHttp = new PollHttp(_client, _endpoint.BaseUrl, PollTimeout);
+            using var probeHttp = new PollHttp(_client, _endpoint.BaseUrl, PollTimeout, _authToken);
             var fp = await new Discovery.EndpointFingerprinter(_ => probeHttp)
                 .FingerprintAsync(_endpoint.BaseUrl, ct).ConfigureAwait(false);
             if (fp.Kind == BackendKind.Unknown && ct.IsCancellationRequested) return;
             KnownKind = fp.Kind == BackendKind.Unknown ? BackendKind.GenericOpenAi : fp.Kind;
         }
 
-
-        _adapter ??= _adapterFactory(KnownKind.Value);
+        lock (_adapterLock)
+        {
+            _adapter ??= _adapterFactory(KnownKind.Value);
+        }
 
         while (!ct.IsCancellationRequested)
         {
             var delay = PollInterval;
             try
             {
-                using var http = new PollHttp(_client, _endpoint.BaseUrl, PollTimeout);
-                var snapshot = await _adapter.CollectAsync(http, ct).ConfigureAwait(false);
+                IBackendAdapter adapter;
+                lock (_adapterLock)
+                {
+                    _adapter ??= _adapterFactory(KnownKind.Value);
+                    adapter = _adapter;
+                }
+
+                using var http = new PollHttp(_client, _endpoint.BaseUrl, PollTimeout, _authToken);
+                var snapshot = await adapter.CollectAsync(http, ct).ConfigureAwait(false);
                 if (snapshot.State != _lastLoggedState)
                 {
                     Log.Info($"{_endpoint.Id} state {(_lastLoggedState?.ToString() ?? "first")} -> {snapshot.State}");
@@ -191,7 +259,7 @@ public sealed class BackendCollector : IDisposable
     }
 
     /// <summary>Non-owning IHttp over the collector's shared client.</summary>
-    private sealed class PollHttp(HttpClient client, Uri baseUrl, TimeSpan timeout) : IHttp, IDisposable
+    private sealed class PollHttp(HttpClient client, Uri baseUrl, TimeSpan timeout, string? authToken = null) : IHttp, IDisposable
     {
         public Uri BaseUrl { get; } = HttpService.NormalizeBase(baseUrl);
         public TimeSpan Timeout { get; } = timeout;
@@ -202,7 +270,14 @@ public sealed class BackendCollector : IDisposable
             linked.CancelAfter(Timeout);
             try
             {
-                using var resp = await client.GetAsync(new Uri(BaseUrl, path), HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
+                using var req = new HttpRequestMessage(HttpMethod.Get, new Uri(BaseUrl, path));
+                if (!string.IsNullOrWhiteSpace(authToken))
+                {
+                    req.Headers.Authorization =
+                        new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", authToken.Trim());
+                }
+
+                using var resp = await client.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, linked.Token).ConfigureAwait(false);
                 if (!resp.IsSuccessStatusCode) return ((int)resp.StatusCode, string.Empty);
                 var body = await resp.Content.ReadAsStringAsync(linked.Token).ConfigureAwait(false);
                 return ((int)resp.StatusCode, body);

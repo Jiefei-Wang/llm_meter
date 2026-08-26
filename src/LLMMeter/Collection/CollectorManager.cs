@@ -9,43 +9,119 @@ namespace LLMMeter.Collection;
 public sealed class CollectorManager : IDisposable
 {
     private readonly Dictionary<string, BackendCollector> _collectors = new();
+    private readonly Dictionary<string, int> _refCounts = new();
     private readonly object _lock = new();
 
-    public BackendCollector GetOrAdd(EndpointRef endpoint, BackendKind? knownKind, string? modelId = null)
+    /// <summary>
+    /// Acquires an active collector for the specified target, creating and starting it if needed,
+    /// and incrementing the target's reference count.
+    /// </summary>
+    public BackendCollector Acquire(EndpointRef endpoint, BackendKind? knownKind, string? modelId = null)
     {
         string key = CollectorKey(endpoint, modelId);
-        BackendCollector? toDispose = null;
         lock (_lock)
         {
             if (_collectors.TryGetValue(key, out var existing) && !existing.IsDisposed)
             {
-                var currentKind = existing.EffectiveKind;
                 var targetKind = knownKind ?? BackendKind.Unknown;
-
-                // Check if the backend kind changed to an incompatible kind.
-                // Do not downgrade a known specific backend to Unknown.
-                bool needsReplacement = targetKind != BackendKind.Unknown &&
-                    ((currentKind == BackendKind.Unknown) || (currentKind != targetKind));
-
-                if (!needsReplacement)
+                if (targetKind != BackendKind.Unknown && existing.EffectiveKind != targetKind)
                 {
-                    if (!string.Equals(existing.Endpoint.AuthToken, endpoint.AuthToken, StringComparison.Ordinal))
-                    {
-                        existing.Reconfigure(endpoint);
-                    }
-                    return existing;
+                    existing.ChangeKind(targetKind);
                 }
 
-                toDispose = existing;
-                _collectors.Remove(key);
+                if (!string.Equals(existing.Endpoint.AuthToken, endpoint.AuthToken, StringComparison.Ordinal))
+                {
+                    existing.Reconfigure(endpoint);
+                }
+
+                _refCounts[key] = _refCounts.GetValueOrDefault(key) + 1;
+                return existing;
             }
 
             var collector = new BackendCollector(endpoint, knownKind, modelId);
             _collectors[key] = collector;
+            _refCounts[key] = 1;
             collector.Start();
-
-            toDispose?.Dispose();
             return collector;
+        }
+    }
+
+    /// <summary>
+    /// Decrements the reference count for the specified collector. If no observers remain,
+    /// the collector is stopped, disposed, and removed.
+    /// </summary>
+    public void Release(BackendCollector collector)
+    {
+        string key = CollectorKey(collector.Endpoint, collector.ModelId);
+        BackendCollector? toDispose = null;
+        lock (_lock)
+        {
+            if (_refCounts.TryGetValue(key, out int count))
+            {
+                count--;
+                if (count <= 0)
+                {
+                    _refCounts.Remove(key);
+                    _collectors.Remove(key);
+                    toDispose = collector;
+                }
+                else
+                {
+                    _refCounts[key] = count;
+                }
+            }
+            else if (_collectors.TryGetValue(key, out var c) && ReferenceEquals(c, collector))
+            {
+                _collectors.Remove(key);
+                toDispose = collector;
+            }
+        }
+        toDispose?.Dispose();
+    }
+
+    /// <summary>
+    /// Passive lookup: returns an existing active collector without creating or starting one.
+    /// </summary>
+    public BackendCollector? TryGet(EndpointRef endpoint, string? modelId = null)
+    {
+        string key = CollectorKey(endpoint, modelId);
+        lock (_lock)
+        {
+            if (_collectors.TryGetValue(key, out var existing) && !existing.IsDisposed)
+                return existing;
+            return null;
+        }
+    }
+
+    public BackendCollector GetOrAdd(EndpointRef endpoint, BackendKind? knownKind, string? modelId = null)
+    {
+        return Acquire(endpoint, knownKind, modelId);
+    }
+
+    public void UpdateBackend(EndpointRef endpoint, BackendKind newKind, string? modelId = null)
+    {
+        string key = CollectorKey(endpoint, modelId);
+        lock (_lock)
+        {
+            if (_collectors.TryGetValue(key, out var existing) && !existing.IsDisposed)
+            {
+                existing.ChangeKind(newKind);
+            }
+        }
+    }
+
+    public void NotifyDisappeared(string dedupeKey)
+    {
+        lock (_lock)
+        {
+            foreach (var kvp in _collectors.ToList())
+            {
+                if (string.Equals(kvp.Value.Endpoint.DedupeKey, dedupeKey, StringComparison.OrdinalIgnoreCase) ||
+                    kvp.Key.StartsWith(dedupeKey + "|", StringComparison.OrdinalIgnoreCase))
+                {
+                    kvp.Value.MarkOffline("Endpoint disappeared from discovery");
+                }
+            }
         }
     }
 

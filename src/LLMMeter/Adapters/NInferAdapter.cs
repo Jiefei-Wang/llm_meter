@@ -56,23 +56,33 @@ public sealed class NInferAdapter : IBackendAdapter, IDisposable
 
     public void SetCurrentCommand(string cmd) => _currentCommand = cmd;
 
-    public Task<FingerprintResult?> IdentifyAsync(IHttp http, CancellationToken ct)
+    public async Task<FingerprintResult?> IdentifyAsync(IHttp http, CancellationToken ct)
     {
-        // 1. If the deterministic telemetry file exists for this port, that is a positive NInfer fingerprint
+        // 1. If the deterministic telemetry file exists for this port, verify health and return positive NInfer fingerprint
         if (_endpoint != null)
         {
             string hostPath = NInferPathHelper.ResolveHostTelemetryPath(_endpoint);
             if (File.Exists(hostPath))
             {
-                return Task.FromResult<FingerprintResult?>(new FingerprintResult(Kind, $"found NInfer telemetry log at {hostPath}"));
+                var health = await http.GetJsonAsync("health", ct).ConfigureAwait(false);
+                bool healthOk = health.HasValue && health.Value.ValueKind == JsonValueKind.Object &&
+                                health.Value.TryGetProperty("status", out var st) &&
+                                st.GetString() == "ok";
+                if (!healthOk)
+                {
+                    var models = await http.GetJsonAsync("v1/models", ct).ConfigureAwait(false);
+                    healthOk = models.HasValue && models.Value.ValueKind == JsonValueKind.Object &&
+                               models.Value.TryGetProperty("data", out var d) && d.ValueKind == JsonValueKind.Array;
+                }
+
+                if (healthOk)
+                {
+                    return new FingerprintResult(Kind, $"found NInfer telemetry log at {hostPath}");
+                }
             }
         }
 
-        // 2. HTTP health check: upstream NInfer /health returns {"status":"ok"}
-        // Note: As specified in Part A2, /health or /v1/models alone without process identity or
-        // explicit manual configuration does not uniquely distinguish NInfer from GenericOpenAi.
-        // Process discovery or explicit configuration supplies positive identification.
-        return Task.FromResult<FingerprintResult?>(null);
+        return null;
     }
 
 
